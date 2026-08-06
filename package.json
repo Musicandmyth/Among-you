@@ -1,0 +1,24 @@
+{
+  "name": "among-ourselves",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Online multiplayer social deduction game — P2P demo (lobby + movement).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4",
+    "pixi.js": "^8.6.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}

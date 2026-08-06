@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Among Ourselves — Demo</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!-- Lobby overlay (DOM). Hidden once the match starts. -->
+    <div id="lobby" class="screen">
+      <div class="panel">
+        <h1>Among <span>Ourselves</span></h1>
+        <p class="tagline">Peer-to-peer demo — lobby &amp; movement</p>
+
+        <label class="field">
+          <span>Your name</span>
+          <input id="name" type="text" maxlength="16" placeholder="Crewmate" />
+        </label>
+
+        <label class="field">
+          <span>Color</span>
+          <div id="colors" class="colors"></div>
+        </label>
+
+        <div id="menu" class="actions">
+          <button id="host-btn" class="btn primary">Create game</button>
+          <div class="join-row">
+            <input id="join-code" type="text" maxlength="12" placeholder="ROOM CODE" />
+            <button id="join-btn" class="btn">Join</button>
+          </div>
+        </div>
+
+        <div id="room" class="room hidden">
+          <div class="room-code">
+            Room code: <strong id="code-value">—</strong>
+            <button id="copy-btn" class="btn tiny">Copy</button>
+          </div>
+          <ul id="player-list" class="player-list"></ul>
+
+          <div id="impostor-config" class="impostor-config hidden">
+            <div class="players-count">
+              Players in lobby: <strong id="lobby-count">1</strong>
+            </div>
+            <div class="stepper">
+              <button id="imp-minus" class="btn tiny step">−</button>
+              <div class="imp-readout">
+                <strong id="imp-count">1</strong>
+                <span>Impostor<span id="imp-plural"></span></span>
+              </div>
+              <button id="imp-plus" class="btn tiny step">+</button>
+            </div>
+          </div>
+
+          <button id="start-btn" class="start-round hidden">Start</button>
+          <p id="wait-msg" class="wait hidden">Waiting for the host to start…</p>
+        </div>
+
+        <p id="status" class="status"></p>
+      </div>
+    </div>
+
+    <!-- Game canvas is mounted here by Pixi. -->
+    <div id="game"></div>
+
+    <div id="hud" class="hud hidden">
+      <span id="hud-room"></span>
+      <span class="hud-hint">WASD move · Shift sprint · E map · K kill · R report · F emergency (at cafeteria button)</span>
+    </div>
+
+    <!-- Global task progress bar. -->
+    <div id="taskbar" class="taskbar hidden">
+      <span id="taskbar-label" class="taskbar-label">Total Tasks  0 / 0</span>
+      <div class="taskbar-track"><div id="taskbar-fill" class="taskbar-fill"></div></div>
+    </div>
+
+    <!-- In-game action buttons. -->
+    <div id="actions" class="actions-bar hidden">
+      <button id="btn-report" class="action">Report</button>
+      <button id="btn-emergency" class="action">Emergency</button>
+      <button id="btn-kill" class="action kill">Kill</button>
+    </div>
+
+    <!-- Meeting overlay (discussion / voting / result), filled in by meeting.ts. -->
+    <div id="meeting" class="overlay hidden"></div>
+
+    <!-- Role reveal shown at match start. -->
+    <div id="reveal" class="overlay hidden">
+      <div class="reveal-card">
+        <div class="reveal-lead">You are</div>
+        <div id="reveal-role" class="reveal-role">CREWMATE</div>
+        <div id="reveal-sub" class="reveal-sub"></div>
+        <div class="reveal-dismiss">Click to dismiss</div>
+      </div>
+    </div>
+
+    <!-- End-of-match banner. -->
+    <div id="gameover" class="overlay hidden">
+      <div class="reveal-card">
+        <div id="go-title" class="reveal-role">IMPOSTORS WIN</div>
+        <div id="go-sub" class="reveal-sub"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
