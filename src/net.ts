@@ -11,7 +11,7 @@
  */
 
 import { Peer } from "peerjs";
-import type { DataConnection } from "peerjs";
+import type { DataConnection, PeerOptions } from "peerjs";
 import {
   peerIdForRoom,
   DEFAULT_RULES,
@@ -84,28 +84,32 @@ export interface NetHandlers {
 }
 
 /**
- * WebRTC ICE configuration built from Vite env vars. When TURN credentials are
- * provided we force `iceTransportPolicy: "relay"`, so every connection is routed
- * through the TURN server and no player ever sees another player's IP address.
- * With no TURN configured it falls back to STUN-only (direct P2P — fine for LAN
- * / local testing, but does expose IPs and can fail across strict NATs).
+ * WebRTC ICE configuration built from Vite env vars.
+ *
+ * Always includes public STUN so direct connections work out of the box. If
+ * TURN credentials are provided they are added as a fallback. Relay-only mode
+ * (which hides IPs by routing everything through TURN) is OPT-IN via
+ * VITE_ICE_RELAY_ONLY="true" — forcing it on without a working TURN server
+ * silently breaks every connection, so it is never the default.
  *
  * Vars (prefixed VITE_ so Vite inlines them into the client bundle):
  *   VITE_TURN_URLS        comma-separated, e.g. "turns:host:5349?transport=tcp"
  *   VITE_TURN_USERNAME    TURN username
  *   VITE_TURN_CREDENTIAL  TURN credential
- *   VITE_ICE_RELAY_ONLY   set to "false" to allow direct paths even with TURN
+ *   VITE_ICE_RELAY_ONLY   set to "true" to force relay-only (needs a real TURN)
  */
 function iceConfig(): RTCConfiguration {
   const env = import.meta.env;
-  const iceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+  const iceServers: RTCIceServer[] = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ];
 
   const turnUrls = (env.VITE_TURN_URLS ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const hasTurn = turnUrls.length > 0;
-  if (hasTurn) {
+  if (turnUrls.length > 0) {
     iceServers.push({
       urls: turnUrls,
       username: env.VITE_TURN_USERNAME ?? "",
@@ -113,10 +117,30 @@ function iceConfig(): RTCConfiguration {
     });
   }
 
-  // Relay-only whenever TURN is present (unless explicitly opted out) — this is
-  // what actually hides IPs. Without TURN, relay-only would connect to nobody.
-  const relayOnly = hasTurn && env.VITE_ICE_RELAY_ONLY !== "false";
+  // Relay-only is explicit opt-in AND requires TURN to be present, otherwise it
+  // would discard every candidate and connect to nobody.
+  const relayOnly = turnUrls.length > 0 && env.VITE_ICE_RELAY_ONLY === "true";
   return relayOnly ? { iceServers, iceTransportPolicy: "relay" } : { iceServers };
+}
+
+/**
+ * PeerJS options: the ICE config, plus an optional custom signaling server.
+ * By default PeerJS uses its public cloud broker, which can be flaky; setting
+ * VITE_PEER_HOST (and optionally PORT/PATH/KEY/SECURE) points at your own
+ * PeerServer instead.
+ */
+function peerOptions(): PeerOptions {
+  const env = import.meta.env;
+  const opts: PeerOptions = { config: iceConfig() };
+  const host = (env.VITE_PEER_HOST ?? "").trim();
+  if (host) {
+    opts.host = host;
+    opts.secure = env.VITE_PEER_SECURE !== "false";
+    if (env.VITE_PEER_PORT) opts.port = Number(env.VITE_PEER_PORT);
+    if (env.VITE_PEER_PATH) opts.path = env.VITE_PEER_PATH;
+    if (env.VITE_PEER_KEY) opts.key = env.VITE_PEER_KEY;
+  }
+  return opts;
 }
 
 /** How long a sabotaged door stays locked, in ms. */
@@ -146,6 +170,9 @@ export class Net {
   /** Set in dispose() so a torn-down Net stops firing handlers (important during
    *  a migration, where the old Net is disposed while a new one is coming up). */
   private disposed = false;
+  /** Watchdog: if the peer never opens (e.g. the signaling server is down), fire
+   *  a clear error instead of leaving the UI stuck on "Connecting…". */
+  private openTimer?: ReturnType<typeof setTimeout>;
 
   private started = false;
   private lastSpawns: { x: number; y: number }[] = [];
@@ -201,11 +228,13 @@ export class Net {
   // ---- factories ----
 
   static host(code: string, name: string, color: number, handlers: NetHandlers): Net {
-    const peer = new Peer(peerIdForRoom(code), { config: iceConfig() });
+    const peer = new Peer(peerIdForRoom(code), peerOptions());
     const me: PlayerInfo = { id: "", name, color };
     const net = new Net(true, peer, me, handlers);
+    net.armOpenWatchdog();
 
     peer.on("open", (id) => {
+      net.clearOpenWatchdog();
       net.myId = id;
       me.id = id;
       net.roster.set(id, me);
@@ -218,11 +247,13 @@ export class Net {
   }
 
   static join(code: string, name: string, color: number, handlers: NetHandlers): Net {
-    const peer = new Peer({ config: iceConfig() });
+    const peer = new Peer(peerOptions());
     const me: PlayerInfo = { id: "", name, color };
     const net = new Net(false, peer, me, handlers);
+    net.armOpenWatchdog();
 
     peer.on("open", (id) => {
+      net.clearOpenWatchdog();
       net.myId = id;
       me.id = id;
       const conn = peer.connect(peerIdForRoom(code), { reliable: true });
@@ -237,6 +268,18 @@ export class Net {
     });
     peer.on("error", (err) => { if (!net.disposed) net.reportPeerError(err); });
     return net;
+  }
+
+  private armOpenWatchdog() {
+    this.openTimer = setTimeout(() => {
+      if (this.disposed) return;
+      this.handlers.onError("Couldn't reach the signaling server. Check your connection and try again.");
+    }, 15_000);
+  }
+
+  private clearOpenWatchdog() {
+    if (this.openTimer) clearTimeout(this.openTimer);
+    this.openTimer = undefined;
   }
 
   // ---- host side ----
@@ -841,6 +884,7 @@ export class Net {
 
   dispose() {
     this.disposed = true;
+    this.clearOpenWatchdog();
     for (const timer of this.doorTimers.values()) clearTimeout(timer);
     this.doorTimers.clear();
     for (const timer of this.cooldownTimers.values()) clearTimeout(timer);
