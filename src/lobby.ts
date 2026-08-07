@@ -1,11 +1,17 @@
-/** Lobby screen: name/color selection, host/join actions, and the roster view. */
+/** Lobby screen: name/color selection, host/join actions, and the roster view.
+ *  The host also gets per-player controls (make host / kick) and buttons for the
+ *  host console and moving the lobby to a new code. */
 
-import { PLAYER_COLORS, type PlayerInfo } from "./protocol";
+import { PLAYER_COLORS, type PeerId, type PlayerInfo } from "./protocol";
 
 export interface LobbyCallbacks {
   onHost: (name: string, color: number) => void;
   onJoin: (code: string, name: string, color: number) => void;
   onStart: () => void;
+  onOpenSettings: () => void;
+  onMoveRoom: () => void;
+  onNominate: (id: PeerId) => void;
+  onKick: (id: PeerId) => void;
 }
 
 export class Lobby {
@@ -23,23 +29,18 @@ export class Lobby {
     codeValue: byId("code-value"),
     copyBtn: byId<HTMLButtonElement>("copy-btn"),
     playerList: byId("player-list"),
+    hostControls: byId("host-controls"),
+    settingsBtn: byId<HTMLButtonElement>("settings-btn"),
+    moveRoomBtn: byId<HTMLButtonElement>("move-room-btn"),
     startBtn: byId<HTMLButtonElement>("start-btn"),
     waitMsg: byId("wait-msg"),
     status: byId("status"),
     hud: byId("hud"),
     hudRoom: byId("hud-room"),
-    impConfig: byId("impostor-config"),
-    lobbyCount: byId("lobby-count"),
-    impCount: byId("imp-count"),
-    impPlural: byId("imp-plural"),
-    impMinus: byId<HTMLButtonElement>("imp-minus"),
-    impPlus: byId<HTMLButtonElement>("imp-plus"),
   };
 
   private roomCode = "";
   private isHost = false;
-  private playerCount = 1;
-  private impostors = 1;
 
   constructor(private cb: LobbyCallbacks) {
     this.el.name.value = randomName();
@@ -71,29 +72,8 @@ export class Lobby {
     });
 
     this.el.startBtn.addEventListener("click", () => this.cb.onStart());
-
-    this.el.impMinus.addEventListener("click", () => this.setImpostors(this.impostors - 1));
-    this.el.impPlus.addEventListener("click", () => this.setImpostors(this.impostors + 1));
-  }
-
-  /** Max impostors allowed for the current roster (always leaves ≥1 crew,
-   *  except when testing solo). Among Us caps impostors at 3. */
-  private maxImpostors(): number {
-    if (this.playerCount <= 1) return 1;
-    return Math.min(3, this.playerCount - 1);
-  }
-
-  private setImpostors(n: number) {
-    this.impostors = Math.max(1, Math.min(n, this.maxImpostors()));
-    this.el.impCount.textContent = String(this.impostors);
-    this.el.impPlural.textContent = this.impostors === 1 ? "" : "s";
-    this.el.impMinus.disabled = this.impostors <= 1;
-    this.el.impPlus.disabled = this.impostors >= this.maxImpostors();
-  }
-
-  /** The host's chosen impostor count. */
-  impostorCount(): number {
-    return this.impostors;
+    this.el.settingsBtn.addEventListener("click", () => this.cb.onOpenSettings());
+    this.el.moveRoomBtn.addEventListener("click", () => this.cb.onMoveRoom());
   }
 
   private renderSwatches() {
@@ -129,18 +109,17 @@ export class Lobby {
     this.el.codeValue.textContent = code;
     this.el.menu.classList.add("hidden");
     this.el.room.classList.remove("hidden");
-    this.el.startBtn.classList.toggle("hidden", !isHost);
-    this.el.waitMsg.classList.toggle("hidden", isHost);
-    this.el.impConfig.classList.toggle("hidden", !isHost); // host picks impostors
-    this.setImpostors(this.impostors);
+    this.applyHostView();
     this.status("");
   }
 
-  setPlayers(players: PlayerInfo[]) {
-    this.playerCount = players.length;
-    this.el.lobbyCount.textContent = String(this.playerCount);
-    if (this.isHost) this.setImpostors(this.impostors); // re-clamp to new roster
+  private applyHostView() {
+    this.el.hostControls.classList.toggle("hidden", !this.isHost);
+    this.el.startBtn.classList.toggle("hidden", !this.isHost);
+    this.el.waitMsg.classList.toggle("hidden", this.isHost);
+  }
 
+  setPlayers(players: PlayerInfo[]) {
     this.el.playerList.replaceChildren();
     players.forEach((p, i) => {
       const li = document.createElement("li");
@@ -150,14 +129,30 @@ export class Lobby {
       dot.style.background = hex(p.color);
 
       const label = document.createElement("span");
+      label.className = "player-name";
       label.textContent = p.name;
 
       li.append(dot, label);
+
       if (i === 0) {
         const tag = document.createElement("span");
         tag.className = "host-tag";
         tag.textContent = "Host";
         li.append(tag);
+      } else if (this.isHost) {
+        // The host can promote or remove any other player. (Row 0 is the host.)
+        const actions = document.createElement("span");
+        actions.className = "player-actions";
+        const makeHost = document.createElement("button");
+        makeHost.className = "btn tiny";
+        makeHost.textContent = "Make host";
+        makeHost.addEventListener("click", () => this.cb.onNominate(p.id));
+        const kick = document.createElement("button");
+        kick.className = "btn tiny danger";
+        kick.textContent = "Kick";
+        kick.addEventListener("click", () => this.cb.onKick(p.id));
+        actions.append(makeHost, kick);
+        li.append(actions);
       }
       this.el.playerList.appendChild(li);
     });
@@ -168,7 +163,7 @@ export class Lobby {
     this.el.status.classList.toggle("ok", ok);
   }
 
-  /** Re-enable the menu after a failed connection so the user can retry. */
+  /** Re-enable the menu after a failed connection / kick so the user can retry. */
   resetMenu() {
     this.el.hostBtn.disabled = false;
     this.el.joinBtn.disabled = false;
@@ -184,16 +179,13 @@ export class Lobby {
   }
 
   /** After a match ends: hide the HUD and bring back the room/roster view so
-   *  the host can tweak impostors and start another round. */
+   *  the host can tweak rules and start another round. */
   returnToLobby() {
     this.el.hud.classList.add("hidden");
     this.el.lobby.classList.remove("hidden");
     this.el.menu.classList.add("hidden");
     this.el.room.classList.remove("hidden");
-    this.el.startBtn.classList.toggle("hidden", !this.isHost);
-    this.el.waitMsg.classList.toggle("hidden", this.isHost);
-    this.el.impConfig.classList.toggle("hidden", !this.isHost);
-    this.setImpostors(this.impostors);
+    this.applyHostView();
     this.status("");
   }
 }

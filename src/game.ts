@@ -17,7 +17,7 @@ import { taskById, type TaskDef } from "./tasks";
 import { VENTS, ventById, type VentDef } from "./vents";
 import { TaskUI } from "./taskui";
 import type { Net } from "./net";
-import type { PeerId, PlayerInfo, PlayerState, Role } from "./protocol";
+import type { GameRules, PeerId, PlayerInfo, PlayerState, Role } from "./protocol";
 
 const SPEED = 190;
 const ACCEL = 1800;
@@ -35,7 +35,6 @@ const REPORT_RANGE = 90;
 const EMERGENCY_RANGE = 90; // must be this close to the cafeteria button
 const TASK_RANGE = 90; // must be this close to a task console to use it
 const VENT_RANGE = 34; // must be standing on top of the vent grate to drop in
-const KILL_COOLDOWN_MS = 20_000;
 
 const CREW_COLOR = 0x5b8cff;
 const IMPOSTOR_COLOR = 0xff5b6e;
@@ -98,7 +97,13 @@ export class Game {
   // Meeting freeze / teleport.
   private frozen = false;
   private killReadyAt = 0;
-  private emergencyUsed = false;
+
+  // Rules (from the host, applied at match start).
+  private killCooldownMs = 20_000;
+  private emergencyCooldownMs = 20_000;
+  private emergenciesPerPlayer = 1;
+  private emergenciesUsed = 0;
+  private emergencyReadyAt = 0;
 
   // Tasks (crew only).
   private taskUI = new TaskUI();
@@ -136,9 +141,14 @@ export class Game {
     role: Role,
     impostors: PeerId[],
     tasks: string[],
+    rules: GameRules,
   ) {
     this.role = role;
     this.impostors = new Set(impostors);
+    this.killCooldownMs = rules.killCooldownMs;
+    this.emergencyCooldownMs = rules.emergencyCooldownMs;
+    this.emergenciesPerPlayer = rules.emergenciesPerPlayer;
+    this.emergenciesUsed = 0;
 
     await this.app.init({ background: 0x05070f, antialias: true, resizeTo: window });
     mount.appendChild(this.app.canvas);
@@ -167,7 +177,8 @@ export class Game {
     this.showRoleBadge();
     this.wireActionButtons();
 
-    this.killReadyAt = now() + KILL_COOLDOWN_MS;
+    this.killReadyAt = now() + this.killCooldownMs;
+    this.emergencyReadyAt = now() + this.emergencyCooldownMs; // initial cooldown
 
     this.keyHandler = (e) => {
       if (e.repeat) return;
@@ -486,7 +497,7 @@ export class Game {
     const victim = this.nearestKillTarget();
     if (!victim) return;
     this.net.requestKill(victim.info.id, victim.x, victim.y);
-    this.killReadyAt = now() + KILL_COOLDOWN_MS;
+    this.killReadyAt = now() + this.killCooldownMs;
   }
 
   private tryReport() {
@@ -496,9 +507,11 @@ export class Game {
   }
 
   private tryEmergency() {
-    if (!this.local.alive || this.frozen || this.emergencyUsed) return;
+    if (!this.local.alive || this.frozen || this.vented) return;
+    if (this.emergenciesUsed >= this.emergenciesPerPlayer) return; // out of meetings
+    if (now() < this.emergencyReadyAt) return; // still on cooldown
     if (!this.nearEmergencyButton()) return; // only at the cafeteria console
-    this.emergencyUsed = true;
+    this.emergenciesUsed++;
     this.net.requestEmergency();
   }
 
@@ -755,12 +768,18 @@ export class Game {
       const show = this.local.alive && !this.vented;
       this.btnEmergency.style.display = show ? "" : "none";
       if (show) {
-        this.btnEmergency.disabled = this.frozen || this.emergencyUsed || !this.nearEmergencyButton();
-        this.btnEmergency.textContent = this.emergencyUsed
-          ? "Used"
-          : this.nearEmergencyButton()
-            ? "Emergency"
-            : "Go to button";
+        const outOfMeetings = this.emergenciesUsed >= this.emergenciesPerPlayer;
+        const cooldown = Math.ceil((this.emergencyReadyAt - now()) / 1000);
+        const near = this.nearEmergencyButton();
+        this.btnEmergency.disabled =
+          this.frozen || outOfMeetings || cooldown > 0 || !near;
+        this.btnEmergency.textContent = outOfMeetings
+          ? "No meetings"
+          : cooldown > 0
+            ? `Wait ${cooldown}s`
+            : near
+              ? "Emergency"
+              : "Go to button";
       }
     }
     if (this.btnVent) {
@@ -966,7 +985,8 @@ export class Game {
 
   onMeetingEnd() {
     this.frozen = false;
-    this.killReadyAt = now() + KILL_COOLDOWN_MS; // cooldown resets after meetings
+    this.killReadyAt = now() + this.killCooldownMs; // cooldowns reset after meetings
+    this.emergencyReadyAt = now() + this.emergencyCooldownMs;
   }
 
   // ---- network callbacks ----

@@ -7,9 +7,10 @@
 import { Game } from "./game";
 import { Lobby } from "./lobby";
 import { Meeting } from "./meeting";
+import { HostConsole } from "./hostconsole";
 import { Net, type NetHandlers } from "./net";
 import { MAP } from "./map";
-import { generateRoomCode, type PeerId, type PlayerInfo, type Role } from "./protocol";
+import { generateRoomCode, type GameRules, type PeerId, type PlayerInfo, type Role } from "./protocol";
 
 let net: Net | null = null;
 let game: Game | null = null;
@@ -19,40 +20,66 @@ let isHost = false;
 let roster: PlayerInfo[] = [];
 let lastVotingMs = 30_000;
 
+// Identity is preserved across a lobby migration (reconnecting to a new code).
+let localName = "";
+let localColor = 0;
+
+// Migration state: while `migrating`, a transient disconnect is expected and we
+// retry the join a few times rather than bailing to the menu.
+let migrating = false;
+let migrateJoinTries = 0;
+
 const meeting = new Meeting({
   onVote: (target) => net?.requestVote(target),
   onChat: (text) => net?.requestChat(text),
 });
 
+const hostConsole = new HostConsole({
+  onChange: (rules) => net?.setRules(rules),
+});
+
 const lobby = new Lobby({
   onHost: (name, color) => {
+    localName = name;
+    localColor = color;
     roomCode = generateRoomCode(Math.random);
     isHost = true;
     net = Net.host(roomCode, name, color, handlers);
   },
   onJoin: (code, name, color) => {
+    localName = name;
+    localColor = color;
     roomCode = code;
     isHost = false;
     net = Net.join(code, name, color, handlers);
   },
   onStart: () => {
-    // Host only: kick off the match for everyone with the chosen impostor count.
-    net?.startMatch(MAP.spawns, lobby.impostorCount());
+    // Host only: push the latest rules, then kick off the match for everyone.
+    net?.setRules(hostConsole.rules());
+    net?.startMatch(MAP.spawns);
   },
+  onOpenSettings: () => hostConsole.open(),
+  onMoveRoom: () => startMigration(generateRoomCode(Math.random), myId),
+  onNominate: (id) => startMigration(generateRoomCode(Math.random), id),
+  onKick: (id) => net?.kick(id),
 });
 
 const handlers: NetHandlers = {
   onReady: (id) => {
     myId = id;
+    migrating = false;
+    migrateJoinTries = 0;
+    if (isHost) net?.setRules(hostConsole.rules());
     lobby.enterRoom(roomCode, isHost);
   },
   onLobby: (players) => {
     roster = players;
     lobby.setPlayers(players);
+    hostConsole.setPlayerCount(players.length);
     game?.updateRoster(players);
   },
-  onStart: (spawns, role, impostors, impostorCount, tasks) => {
-    void startMatch(spawns, role, impostors, impostorCount, tasks);
+  onStart: (spawns, role, impostors, impostorCount, tasks, rules) => {
+    void startMatch(spawns, role, impostors, impostorCount, tasks, rules);
   },
   onState: (players) => game?.applyState(players),
   onInput: (id, x, y, vx, vy, vented) => game?.applyInput(id, x, y, vx, vy, vented),
@@ -80,7 +107,27 @@ const handlers: NetHandlers = {
     game?.onMeetingEnd();
     meeting.close();
   },
+  onMigrate: (code, hostId) => reconnect(code, hostId),
+  onKicked: () => {
+    migrating = false;
+    net?.dispose();
+    net = null;
+    lobby.resetMenu();
+    lobby.status("You were removed from the room by the host.");
+  },
   onError: (message) => {
+    // During a migration a "no game found" is just the new host not being up
+    // yet — retry the join a few times before giving up.
+    if (migrating && !isHost && migrateJoinTries > 0) {
+      migrateJoinTries--;
+      net?.dispose();
+      net = null;
+      window.setTimeout(() => {
+        net = Net.join(roomCode, localName, localColor, handlers);
+      }, 1200);
+      return;
+    }
+    migrating = false;
     lobby.status(message);
     lobby.resetMenu();
     net?.dispose();
@@ -88,18 +135,48 @@ const handlers: NetHandlers = {
   },
 };
 
+/** Host-initiated lobby migration: tell everyone to reconnect to `code` with
+ *  `hostId` as the new host, then reconnect this peer too. */
+function startMigration(code: string, hostId: PeerId) {
+  if (!net?.isHost) return;
+  net.announceMigrate(code, hostId);
+  // Let the broadcast flush, then this peer tears down and reconnects as well.
+  window.setTimeout(() => reconnect(code, hostId), 250);
+}
+
+/** Tear down the current Net and reconnect to `code`. The peer whose (current)
+ *  id equals `hostId` re-hosts; everyone else rejoins after a short delay. */
+function reconnect(code: string, hostId: PeerId) {
+  migrating = true;
+  roomCode = code;
+  const asHost = myId === hostId;
+  isHost = asHost;
+  net?.dispose();
+  net = null;
+  lobby.status(asHost ? "Opening the new room…" : "Moving to the new room…");
+  if (asHost) {
+    net = Net.host(code, localName, localColor, handlers);
+  } else {
+    migrateJoinTries = 5;
+    window.setTimeout(() => {
+      net = Net.join(code, localName, localColor, handlers);
+    }, 1200); // give the new host time to register with the broker first
+  }
+}
+
 async function startMatch(
   spawns: { x: number; y: number }[],
   role: Role,
   impostors: PeerId[],
   impostorCount: number,
   tasks: string[],
+  rules: GameRules,
 ) {
   if (game || !net) return; // guard against a duplicate start
   lobby.hideForMatch();
   game = new Game(net, myId);
   const mount = document.getElementById("game")!;
-  await game.start(roster, spawns, mount, role, impostors, tasks);
+  await game.start(roster, spawns, mount, role, impostors, tasks, rules);
   showReveal(role, impostorCount);
 }
 

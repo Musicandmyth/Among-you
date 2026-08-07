@@ -20,6 +20,26 @@ export interface PlayerInfo {
   color: number;
 }
 
+/** Host-configurable match rules (set in the host console, applied at start). */
+export interface GameRules {
+  /** How many impostors to assign. */
+  impostorCount: number;
+  /** Cooldown between an impostor's kills, in ms. */
+  killCooldownMs: number;
+  /** Cooldown after any meeting (and at round start) before an emergency can be
+   *  called, in ms. */
+  emergencyCooldownMs: number;
+  /** How many emergency meetings each player may call in a match. */
+  emergenciesPerPlayer: number;
+}
+
+export const DEFAULT_RULES: GameRules = {
+  impostorCount: 1,
+  killCooldownMs: 20_000,
+  emergencyCooldownMs: 20_000,
+  emergenciesPerPlayer: 1,
+};
+
 /** A player's movement state, streamed during the match. */
 export interface PlayerState {
   id: PeerId;
@@ -79,6 +99,22 @@ export interface StartMsg {
   impostorCount: number;
   /** THIS recipient's assigned task ids, in order (crew only; empty for impostors). */
   tasks: string[];
+  /** The match rules chosen by the host. */
+  rules: GameRules;
+}
+
+/** Host -> clients: everyone should disconnect and reconnect to a new room code
+ *  (used for host transfer and "move lobby to another code"). The peer whose id
+ *  equals `hostId` becomes the new host of `code`; everyone else joins it. */
+export interface MigrateMsg {
+  t: "migrate";
+  code: string;
+  hostId: PeerId;
+}
+
+/** Host -> one client: you have been removed from the room. */
+export interface KickedMsg {
+  t: "kicked";
 }
 
 /** Impostor -> host: request to lock a door via the sabotage map. */
@@ -231,7 +267,9 @@ export type NetMessage =
   | MeetingResultMsg
   | MeetingEndMsg
   | TaskDoneMsg
-  | TaskProgressMsg;
+  | TaskProgressMsg
+  | MigrateMsg
+  | KickedMsg;
 
 /** Fixed palette of selectable player colors. */
 export const PLAYER_COLORS = [

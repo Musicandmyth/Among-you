@@ -14,6 +14,8 @@ import { Peer } from "peerjs";
 import type { DataConnection } from "peerjs";
 import {
   peerIdForRoom,
+  DEFAULT_RULES,
+  type GameRules,
   type MeetingPlayer,
   type NetMessage,
   type PeerId,
@@ -37,6 +39,7 @@ export interface NetHandlers {
     impostors: PeerId[],
     impostorCount: number,
     tasks: string[],
+    rules: GameRules,
   ) => void;
   /** CLIENT ONLY: a fresh world snapshot arrived from the host. */
   onState: (players: PlayerState[]) => void;
@@ -71,6 +74,11 @@ export interface NetHandlers {
   ) => void;
   /** Meeting closed; resume play. */
   onMeetingEnd: () => void;
+  /** Host asked everyone to move to a new room code (host transfer / move-code).
+   *  The peer whose id is `hostId` re-hosts `code`; everyone else rejoins it. */
+  onMigrate: (code: string, hostId: PeerId) => void;
+  /** The host removed you from the room. */
+  onKicked: () => void;
   /** Fatal/soft networking error, surfaced to the UI. */
   onError: (message: string) => void;
 }
@@ -135,6 +143,9 @@ export class Net {
   private conns = new Map<PeerId, DataConnection>();
   /** CLIENT: the single connection to the host. */
   private hostConn: DataConnection | null = null;
+  /** Set in dispose() so a torn-down Net stops firing handlers (important during
+   *  a migration, where the old Net is disposed while a new one is coming up). */
+  private disposed = false;
 
   private started = false;
   private lastSpawns: { x: number; y: number }[] = [];
@@ -157,8 +168,14 @@ export class Net {
   /** HOST: outstanding bodies, keyed by body id. */
   private bodies = new Map<string, { victim: PeerId; x: number; y: number }>();
   private bodyCounter = 0;
-  /** HOST: players who have already used their emergency meeting. */
-  private emergencyUsed = new Set<PeerId>();
+  /** HOST: how many emergency meetings each player has called this match. */
+  private emergencyCount = new Map<PeerId, number>();
+  /** HOST: timestamp (ms) of the last meeting end / round start — emergencies are
+   *  on cooldown until `emergencyCooldownMs` after this. */
+  private lastMeetingAt = 0;
+  /** Match rules. On the host these are authoritative and edited via the console;
+   *  clients receive the host's copy in the start message. */
+  private rules: GameRules = { ...DEFAULT_RULES };
   /** HOST: meeting state. */
   private meetingActive = false;
   private votingPhase = false;
@@ -196,7 +213,7 @@ export class Net {
       handlers.onLobby(net.playerList());
     });
     peer.on("connection", (conn) => net.acceptConnection(conn));
-    peer.on("error", (err) => net.reportPeerError(err));
+    peer.on("error", (err) => { if (!net.disposed) net.reportPeerError(err); });
     return net;
   }
 
@@ -215,10 +232,10 @@ export class Net {
         handlers.onReady(id);
       });
       conn.on("data", (data) => net.onClientData(data as NetMessage));
-      conn.on("close", () => handlers.onError("Disconnected from host."));
-      conn.on("error", () => handlers.onError("Connection to host failed."));
+      conn.on("close", () => { if (!net.disposed) handlers.onError("Disconnected from host."); });
+      conn.on("error", () => { if (!net.disposed) handlers.onError("Connection to host failed."); });
     });
-    peer.on("error", (err) => net.reportPeerError(err));
+    peer.on("error", (err) => { if (!net.disposed) net.reportPeerError(err); });
     return net;
   }
 
@@ -226,8 +243,8 @@ export class Net {
 
   private acceptConnection(conn: DataConnection) {
     conn.on("data", (data) => this.onHostData(conn, data as NetMessage));
-    conn.on("close", () => this.removePlayer(conn.peer));
-    conn.on("error", () => this.removePlayer(conn.peer));
+    conn.on("close", () => { if (!this.disposed) this.removePlayer(conn.peer); });
+    conn.on("error", () => { if (!this.disposed) this.removePlayer(conn.peer); });
   }
 
   private onHostData(conn: DataConnection, msg: NetMessage) {
@@ -402,8 +419,13 @@ export class Net {
 
   private hostEmergency(caller: PeerId) {
     if (!this.isHost || this.meetingActive || this.ended) return;
-    if (this.dead.has(caller) || this.emergencyUsed.has(caller)) return;
-    this.emergencyUsed.add(caller);
+    if (this.dead.has(caller)) return;
+    // Per-player emergency limit.
+    const used = this.emergencyCount.get(caller) ?? 0;
+    if (used >= this.rules.emergenciesPerPlayer) return;
+    // Shared cooldown since the last meeting (and since round start).
+    if (Date.now() - this.lastMeetingAt < this.rules.emergencyCooldownMs) return;
+    this.emergencyCount.set(caller, used + 1);
     this.startMeeting("emergency", caller);
   }
 
@@ -530,6 +552,7 @@ export class Net {
   private endMeeting() {
     this.meetingActive = false;
     this.clearMeetingTimers();
+    this.lastMeetingAt = Date.now(); // emergency cooldown restarts after a meeting
     this.resetDoors(); // doors are open + immediately closable coming out of a meeting
     this.broadcast({ t: "meeting_end" });
     this.handlers.onMeetingEnd();
@@ -596,11 +619,11 @@ export class Net {
    * random from the roster and sends each player a start message tailored to
    * their role (crew never learn who the impostors are).
    */
-  startMatch(spawns: { x: number; y: number }[], requestedImpostors: number) {
+  startMatch(spawns: { x: number; y: number }[]) {
     if (!this.isHost) return;
 
     const ids = this.playerList().map((p) => p.id);
-    const count = Math.max(1, Math.min(Math.floor(requestedImpostors), ids.length));
+    const count = Math.max(1, Math.min(Math.floor(this.rules.impostorCount), ids.length));
     const shuffled = [...ids].sort(() => Math.random() - 0.5);
     this.impostorIds = shuffled.slice(0, count);
     const impSet = new Set(this.impostorIds);
@@ -608,6 +631,10 @@ export class Net {
 
     this.started = true;
     this.lastSpawns = spawns;
+
+    // Reset emergency tracking; the round-start cooldown runs from now.
+    this.emergencyCount.clear();
+    this.lastMeetingAt = Date.now();
 
     // Deal each crewmate their own random task sequence.
     this.taskAssign.clear();
@@ -626,6 +653,7 @@ export class Net {
         impostors: role === "impostor" ? this.impostorIds : [],
         impostorCount,
         tasks: this.taskAssign.get(id) ?? [],
+        rules: this.rules,
       });
     }
 
@@ -639,9 +667,37 @@ export class Net {
       myRole === "impostor" ? this.impostorIds : [],
       impostorCount,
       this.taskAssign.get(this.myId) ?? [],
+      this.rules,
     );
 
     this.broadcastTaskProgress(); // initial 0 / total bar
+  }
+
+  /** HOST: update the match rules (from the host console). */
+  setRules(rules: GameRules) {
+    this.rules = { ...rules };
+  }
+
+  getRules(): GameRules {
+    return this.rules;
+  }
+
+  // ---- host lobby controls: kick / migrate ----
+
+  /** HOST: remove a player from the room. */
+  kick(id: PeerId) {
+    if (!this.isHost || id === this.myId) return;
+    const conn = this.conns.get(id);
+    if (conn && conn.open) conn.send({ t: "kicked" });
+    this.removePlayer(id); // updates roster + broadcasts to everyone else
+    if (conn) setTimeout(() => conn.close(), 150);
+  }
+
+  /** HOST: tell everyone to reconnect to a new room code. `hostId` becomes the
+   *  new host. The caller then tears down this Net and reconnects (see main). */
+  announceMigrate(code: string, hostId: PeerId) {
+    if (!this.isHost) return;
+    this.broadcast({ t: "migrate", code, hostId });
   }
 
   /** HOST: clear all door state so every door is open and immediately closable
@@ -668,7 +724,7 @@ export class Net {
     this.dead.clear();
     this.bodies.clear();
     this.bodyCounter = 0;
-    this.emergencyUsed.clear();
+    this.emergencyCount.clear();
     this.meetingActive = false;
     this.votingPhase = false;
     this.votes.clear();
@@ -708,7 +764,7 @@ export class Net {
         break;
       case "start":
         this.started = true;
-        this.handlers.onStart(msg.spawns, msg.role, msg.impostors, msg.impostorCount, msg.tasks);
+        this.handlers.onStart(msg.spawns, msg.role, msg.impostors, msg.impostorCount, msg.tasks, msg.rules);
         break;
       case "state":
         this.handlers.onState(msg.players);
@@ -739,6 +795,12 @@ export class Net {
         break;
       case "meeting_end":
         this.handlers.onMeetingEnd();
+        break;
+      case "migrate":
+        this.handlers.onMigrate(msg.code, msg.hostId);
+        break;
+      case "kicked":
+        this.handlers.onKicked();
         break;
       case "leave":
         break; // roster refresh arrives via the following "lobby"
@@ -778,6 +840,7 @@ export class Net {
   }
 
   dispose() {
+    this.disposed = true;
     for (const timer of this.doorTimers.values()) clearTimeout(timer);
     this.doorTimers.clear();
     for (const timer of this.cooldownTimers.values()) clearTimeout(timer);
