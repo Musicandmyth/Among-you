@@ -29,6 +29,8 @@ export interface PlayerState {
   y: number;
   vx: number;
   vy: number;
+  /** True while the player is inside a vent (impostors only; hidden to others). */
+  vented?: boolean;
 }
 
 // ---- client (joiner) -> host ----
@@ -46,6 +48,8 @@ export interface InputMsg {
   y: number;
   vx: number;
   vy: number;
+  /** True while inside a vent — the host only honors this from impostors. */
+  vented?: boolean;
 }
 
 // ---- host -> client ----

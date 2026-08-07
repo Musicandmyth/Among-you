@@ -14,12 +14,12 @@ import { Application, Container, Graphics, Text } from "pixi.js";
 import { Input } from "./input";
 import { WORLD, ROOMS, WALKABLE, DOORS, EMERGENCY_BUTTON, moveWithCollision, rayDistance, type Door } from "./map";
 import { taskById, type TaskDef } from "./tasks";
+import { VENTS, ventById, type VentDef } from "./vents";
 import { TaskUI } from "./taskui";
 import type { Net } from "./net";
 import type { PeerId, PlayerInfo, PlayerState, Role } from "./protocol";
 
 const SPEED = 190;
-const SPRINT = 1.6;
 const ACCEL = 1800;
 const DECEL = 2200;
 const RADIUS = 18;
@@ -34,6 +34,7 @@ const KILL_RANGE = 90; // world px — tightened so you must be right next to a 
 const REPORT_RANGE = 90;
 const EMERGENCY_RANGE = 90; // must be this close to the cafeteria button
 const TASK_RANGE = 90; // must be this close to a task console to use it
+const VENT_RANGE = 34; // must be standing on top of the vent grate to drop in
 const KILL_COOLDOWN_MS = 20_000;
 
 const CREW_COLOR = 0x5b8cff;
@@ -52,6 +53,7 @@ interface Avatar {
   targetY: number;
   isLocal: boolean;
   alive: boolean;
+  vented: boolean;
 }
 
 interface Body {
@@ -105,10 +107,18 @@ export class Game {
   private taskMarkers = new Map<string, Container>(); // in-world "!" markers
   private mapTaskGfx = new Map<string, Graphics>(); // markers on the E map
 
+  // Vents (impostor-only movement). Rendered for everyone as map decor.
+  private ventGfx = new Map<string, Graphics>();
+  private vented = false;
+  private currentVentId: string | null = null;
+  private ventNav?: HTMLElement;
+  private ventAnims: { g: Graphics; t: number }[] = []; // brief "lid pops open" tweens
+
   // Action buttons (DOM).
   private btnKill?: HTMLButtonElement;
   private btnReport?: HTMLButtonElement;
   private btnEmergency?: HTMLButtonElement;
+  private btnVent?: HTMLButtonElement;
 
   private sendAcc = 0;
   private broadcastAcc = 0;
@@ -150,6 +160,7 @@ export class Game {
     // Each crewmate gets their own dealt task sequence; impostors get none.
     this.myTasks = tasks.map(taskById).filter((t): t is TaskDef => !!t);
     this.buildTaskMarkers();
+    this.buildVents();
 
     this.buildMapOverlay();
     this.app.stage.addChild(this.map);
@@ -167,6 +178,7 @@ export class Game {
       if (e.key === "k" || e.key === "K") this.tryKill();
       if (e.key === "r" || e.key === "R") this.tryReport();
       if (e.key === "f" || e.key === "F") this.tryEmergency();
+      if (e.key === "q" || e.key === "Q") this.tryVent();
     };
     window.addEventListener("keydown", this.keyHandler);
 
@@ -267,6 +279,7 @@ export class Game {
       targetX: x, targetY: y,
       isLocal: info.id === this.myId,
       alive: true,
+      vented: false,
     });
   }
 
@@ -290,28 +303,35 @@ export class Game {
     this.updateVisibility();
     this.updateActionButtons();
     this.updateTaskMarkers();
+    this.updateVentAnims(dt);
     if (this.mapOpen) this.updateMapMarker();
   }
 
-  /** Ghosts (dead players) are visible only to other ghosts. A living player
-   *  sees no ghosts at all; a dead player sees everyone. */
+  /** Ghosts (dead players) are visible only to other ghosts; a vented impostor
+   *  is hidden from everyone else. A living player sees no ghosts and no vented
+   *  players; a dead player sees everyone (except still-hidden vented ones). */
   private updateVisibility() {
     const ghostView = !this.local.alive;
     for (const av of this.avatars.values()) {
-      if (av.isLocal) continue;
-      av.container.visible = av.alive || ghostView;
+      if (av.isLocal) {
+        // The local player fades while vented so they know they're hidden.
+        av.container.alpha = this.vented ? 0.45 : av.alive ? 1 : 0.4;
+        continue;
+      }
+      av.container.visible = !av.vented && (av.alive || ghostView);
     }
   }
 
   private simulateLocal(dt: number) {
+    const held = this.frozen || this.vented; // no walking during meetings or in a vent
     let dirX = 0;
     let dirY = 0;
-    if (!this.frozen) {
+    if (!held) {
       const dir = this.input.direction();
       dirX = dir.x;
       dirY = dir.y;
     }
-    const max = SPEED * (this.input.sprinting() && !this.frozen ? SPRINT : 1);
+    const max = SPEED;
     const rate = (dirX === 0 && dirY === 0 ? DECEL : ACCEL) * dt;
     this.local.vx = approach(this.local.vx, dirX * max, rate);
     this.local.vy = approach(this.local.vy, dirY * max, rate);
@@ -358,7 +378,7 @@ export class Game {
       this.sendAcc += dt;
       if (this.sendAcc >= SEND_INTERVAL) {
         this.sendAcc = 0;
-        this.net.sendInput(this.local.x, this.local.y, this.local.vx, this.local.vy);
+        this.net.sendInput(this.local.x, this.local.y, this.local.vx, this.local.vy, this.vented);
       }
     }
   }
@@ -371,6 +391,7 @@ export class Game {
         x: av.isLocal ? av.x : av.targetX,
         y: av.isLocal ? av.y : av.targetY,
         vx: av.vx, vy: av.vy,
+        vented: av.isLocal ? this.vented : av.vented,
       });
     }
     return out;
@@ -460,7 +481,7 @@ export class Game {
   // ---- actions ----
 
   private tryKill() {
-    if (this.role !== "impostor" || !this.local.alive || this.frozen) return;
+    if (this.role !== "impostor" || !this.local.alive || this.frozen || this.vented) return;
     if (now() < this.killReadyAt) return;
     const victim = this.nearestKillTarget();
     if (!victim) return;
@@ -557,9 +578,165 @@ export class Game {
     }
   }
 
+  // ---- vents (impostor only) ----
+
+  /** Draw every vent grate in the world. Impostors can tap them to enter, hop,
+   *  or exit; crew see them as inert scenery. */
+  private buildVents() {
+    for (const v of VENTS) {
+      const g = new Graphics();
+      g.position.set(v.x, v.y);
+      if (this.role === "impostor") {
+        g.eventMode = "static";
+        g.cursor = "pointer";
+        g.on("pointertap", () => this.onVentTap(v.id));
+      }
+      // Sit just above the floor/grid (which are drawn opaque over the whole
+      // walkable area) but below avatars — same layer bodies use.
+      this.scene.addChildAt(g, this.scene.getChildIndex(this.doorGfx) + 1);
+      this.ventGfx.set(v.id, g);
+    }
+    this.refreshVents();
+  }
+
+  private refreshVents() {
+    const links = this.currentVentId ? ventById(this.currentVentId)?.links ?? [] : [];
+    for (const [id, g] of this.ventGfx) {
+      // Reachable = the vent you're in, or one linked to it while vented.
+      const active = this.vented && (id === this.currentVentId || links.includes(id));
+      drawVent(g, active);
+    }
+  }
+
+  private onVentTap(id: string) {
+    if (this.role !== "impostor" || !this.local.alive || this.frozen) return;
+    if (!this.vented) {
+      if (this.ventInRange(id)) this.enterVent(id);
+      return;
+    }
+    if (id === this.currentVentId) this.exitVent();
+    else if (ventById(this.currentVentId!)?.links.includes(id)) this.moveVent(id);
+  }
+
+  /** Q key / Vent button: enter the nearest vent, or exit if already vented. */
+  private tryVent() {
+    if (this.role !== "impostor" || !this.local.alive || this.frozen) return;
+    if (this.vented) { this.exitVent(); return; }
+    const near = this.nearestVent();
+    if (near) this.enterVent(near.id);
+  }
+
+  private nearestVent(): VentDef | null {
+    let best: VentDef | null = null;
+    let bestD = VENT_RANGE * VENT_RANGE;
+    for (const v of VENTS) {
+      const d = dist2(this.local.x, this.local.y, v.x, v.y);
+      if (d < bestD) { bestD = d; best = v; }
+    }
+    return best;
+  }
+
+  private ventInRange(id: string): boolean {
+    const v = ventById(id);
+    return !!v && dist2(this.local.x, this.local.y, v.x, v.y) <= VENT_RANGE * VENT_RANGE;
+  }
+
+  private enterVent(id: string) {
+    const v = ventById(id);
+    if (!v) return;
+    this.vented = true;
+    this.playVentAnim(id);
+    this.moveToVent(v);
+    this.refreshVents();
+    this.buildVentNav();
+  }
+
+  private moveVent(id: string) {
+    const v = ventById(id);
+    if (!v) return;
+    this.playVentAnim(id);
+    this.moveToVent(v);
+    this.refreshVents();
+    this.buildVentNav();
+  }
+
+  private exitVent() {
+    if (this.currentVentId) this.playVentAnim(this.currentVentId);
+    this.vented = false;
+    this.currentVentId = null;
+    this.refreshVents();
+    this.clearVentNav();
+  }
+
+  /** Kick off a quick "grate pops open" tween on a vent's graphic. */
+  private playVentAnim(id: string) {
+    const g = this.ventGfx.get(id);
+    if (!g) return;
+    if (!this.ventAnims.some((a) => a.g === g)) this.ventAnims.push({ g, t: 0 });
+  }
+
+  /** Advance the vent-open tweens: a brief pop (scale up) that settles back. */
+  private updateVentAnims(dt: number) {
+    const DURATION = 0.28;
+    for (let i = this.ventAnims.length - 1; i >= 0; i--) {
+      const anim = this.ventAnims[i]!;
+      anim.t += dt;
+      const p = Math.min(1, anim.t / DURATION);
+      const pop = 1 + 0.45 * Math.sin(p * Math.PI); // 1 → 1.45 → 1
+      anim.g.scale.set(pop);
+      if (p >= 1) {
+        anim.g.scale.set(1);
+        this.ventAnims.splice(i, 1);
+      }
+    }
+  }
+
+  private moveToVent(v: VentDef) {
+    this.currentVentId = v.id;
+    this.local.x = v.x;
+    this.local.y = v.y;
+    this.local.vx = 0;
+    this.local.vy = 0;
+    this.local.container.position.set(v.x, v.y);
+  }
+
+  /** Build the on-screen vent-navigation panel: an Exit button plus one button
+   *  per connected vent (labelled with a direction arrow + destination room). */
+  private buildVentNav() {
+    const v = this.currentVentId ? ventById(this.currentVentId) : undefined;
+    if (!v) return this.clearVentNav();
+    if (!this.ventNav) {
+      this.ventNav = document.createElement("div");
+      this.ventNav.id = "vent-nav";
+      this.ventNav.className = "vent-nav";
+      document.body.appendChild(this.ventNav);
+    }
+    this.ventNav.replaceChildren();
+
+    for (const linkId of v.links) {
+      const dest = ventById(linkId);
+      if (!dest) continue;
+      const btn = document.createElement("button");
+      btn.className = "vent-btn";
+      btn.textContent = `${arrow(v.x, v.y, dest.x, dest.y)}  ${dest.room}`;
+      btn.addEventListener("click", () => this.moveVent(linkId));
+      this.ventNav.appendChild(btn);
+    }
+    const exit = document.createElement("button");
+    exit.className = "vent-btn exit";
+    exit.textContent = "Exit Vent (Q)";
+    exit.addEventListener("click", () => this.exitVent());
+    this.ventNav.appendChild(exit);
+  }
+
+  private clearVentNav() {
+    this.ventNav?.remove();
+    this.ventNav = undefined;
+  }
+
   private updateActionButtons() {
     if (this.btnKill) {
-      const show = this.role === "impostor" && this.local.alive;
+      const show = this.role === "impostor" && this.local.alive && !this.vented;
       this.btnKill.style.display = show ? "" : "none";
       if (show) {
         const remain = Math.ceil((this.killReadyAt - now()) / 1000);
@@ -570,12 +747,12 @@ export class Game {
       }
     }
     if (this.btnReport) {
-      const show = this.local.alive;
+      const show = this.local.alive && !this.vented;
       this.btnReport.style.display = show ? "" : "none";
       if (show) this.btnReport.disabled = this.frozen || this.nearestBody() === null;
     }
     if (this.btnEmergency) {
-      const show = this.local.alive;
+      const show = this.local.alive && !this.vented;
       this.btnEmergency.style.display = show ? "" : "none";
       if (show) {
         this.btnEmergency.disabled = this.frozen || this.emergencyUsed || !this.nearEmergencyButton();
@@ -586,16 +763,27 @@ export class Game {
             : "Go to button";
       }
     }
+    if (this.btnVent) {
+      const show = this.role === "impostor" && this.local.alive;
+      this.btnVent.style.display = show ? "" : "none";
+      if (show) {
+        const near = this.vented || this.nearestVent() !== null;
+        this.btnVent.disabled = this.frozen || !near;
+        this.btnVent.textContent = this.vented ? "Exit Vent" : "Vent";
+      }
+    }
   }
 
   private wireActionButtons() {
     this.btnKill = document.getElementById("btn-kill") as HTMLButtonElement | null ?? undefined;
     this.btnReport = document.getElementById("btn-report") as HTMLButtonElement | null ?? undefined;
     this.btnEmergency = document.getElementById("btn-emergency") as HTMLButtonElement | null ?? undefined;
+    this.btnVent = document.getElementById("btn-vent") as HTMLButtonElement | null ?? undefined;
     document.getElementById("actions")?.classList.remove("hidden");
     this.btnKill?.addEventListener("click", () => this.tryKill());
     this.btnReport?.addEventListener("click", () => this.tryReport());
     this.btnEmergency?.addEventListener("click", () => this.tryEmergency());
+    this.btnVent?.addEventListener("click", () => this.tryVent());
   }
 
   // ---- single map overlay (E) with impostor sabotage ----
@@ -663,7 +851,7 @@ export class Game {
     }
     this.refreshMapDoors();
 
-    // Crew: mark each task with a "!" on the map / minimap.
+    // Crew: mark each task with a "!" on the minimap.
     for (const task of this.myTasks) {
       const g = new Graphics();
       drawBang(g, 7);
@@ -749,6 +937,7 @@ export class Game {
 
   onMeetingStart() {
     this.frozen = true;
+    if (this.vented) this.exitVent(); // meetings eject you from a vent
     this.clearBodies();
     this.taskUI.close();
     // Everyone gathers in a ring around the emergency button in the Cafeteria.
@@ -787,13 +976,13 @@ export class Game {
       if (p.id === this.myId) continue;
       if (!this.roster.has(p.id)) this.roster.set(p.id, { id: p.id, name: p.name, color: p.color });
       const av = this.ensureAvatar(p.id);
-      if (av) { av.targetX = p.x; av.targetY = p.y; av.vx = p.vx; av.vy = p.vy; }
+      if (av) { av.targetX = p.x; av.targetY = p.y; av.vx = p.vx; av.vy = p.vy; av.vented = !!p.vented; }
     }
   }
 
-  applyInput(id: PeerId, x: number, y: number, vx: number, vy: number) {
+  applyInput(id: PeerId, x: number, y: number, vx: number, vy: number, vented = false) {
     const av = this.ensureAvatar(id);
-    if (av) { av.targetX = x; av.targetY = y; av.vx = vx; av.vy = vy; }
+    if (av) { av.targetX = x; av.targetY = y; av.vx = vx; av.vy = vy; av.vented = vented; }
   }
 
   /** A kill happened: ghost the victim and drop a body. */
@@ -821,6 +1010,7 @@ export class Game {
    *  (updateVision drops the mask, updateVisibility reveals fellow ghosts).
    *  Ghosts keep their tasks — the crew still needs them finished. */
   private onLocalDeath() {
+    if (this.vented) this.exitVent(); // can't stay in a vent once dead
     const badge = document.getElementById("role-badge");
     if (badge) {
       badge.textContent = "GHOST";
@@ -845,6 +1035,7 @@ export class Game {
     if (this.keyHandler) window.removeEventListener("keydown", this.keyHandler);
     document.getElementById("actions")?.classList.add("hidden");
     document.getElementById("role-badge")?.remove();
+    this.clearVentNav();
     this.taskUI.dispose();
     this.app.destroy(true, { children: true });
   }
@@ -867,6 +1058,30 @@ function drawBang(g: Graphics, r = 16) {
   g.circle(0, 0, r).fill(0xffd23d).stroke({ width: 3, color: 0x7a5b00 });
   g.roundRect(-2.5, -r + 5, 5, r - 4, 2).fill(0x3a2b00);
   g.circle(0, r - 6, 2.6).fill(0x3a2b00);
+}
+
+/** Draw a vent grate (a slatted cover) at the origin. `active` highlights vents
+ *  you can currently hop into. */
+function drawVent(g: Graphics, active: boolean) {
+  const w = 44;
+  const h = 34;
+  g.clear();
+  g.roundRect(-w / 2, -h / 2, w, h, 5)
+    .fill(active ? 0x3a1620 : 0x0c1018)
+    .stroke({ width: 3, color: active ? IMPOSTOR_COLOR : 0x6f7bad });
+  const slat = active ? 0xff8391 : 0x8a93ad;
+  for (let i = -1; i <= 1; i++) {
+    g.roundRect(-w / 2 + 7, i * 9 - 3, w - 14, 6, 2).fill(slat);
+  }
+}
+
+/** Pick an arrow glyph pointing from (ax,ay) toward (bx,by). */
+function arrow(ax: number, ay: number, bx: number, by: number): string {
+  const glyphs = ["→", "↘", "↓", "↙", "←", "↖", "↑", "↗"];
+  let a = Math.atan2(by - ay, bx - ax); // -PI..PI, 0 = east, +y is down
+  if (a < 0) a += Math.PI * 2;
+  const idx = Math.round(a / (Math.PI / 4)) % 8;
+  return glyphs[idx];
 }
 
 function darken(c: number, f: number): number {

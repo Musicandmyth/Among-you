@@ -295,6 +295,42 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: #360910;
 }
 .action.kill:hover:not(:disabled) { filter: brightness(1.08); }
+.action.vent {
+  background: #2a3358;
+  border-color: var(--accent);
+  color: var(--text);
+}
+.action.vent:hover:not(:disabled) { filter: brightness(1.1); }
+
+/* Vent navigation panel (shown while an impostor is inside a vent). */
+.vent-nav {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 90vw;
+}
+.vent-btn {
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: 2px solid var(--accent);
+  background: rgba(21, 27, 46, 0.92);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+.vent-btn:hover { background: #263156; }
+.vent-btn.exit {
+  border-color: #ff8391;
+  color: #ffd7dc;
+}
 
 /* Meeting overlay. */
 .meeting-card {

@@ -23,7 +23,6 @@ import {
   type VoteTarget,
 } from "./protocol";
 import { assignTasks } from "./tasks";
-import { DOORS } from "./map";
 
 export interface NetHandlers {
   /** Fired once the local peer is connected and has an identity. */
@@ -42,7 +41,7 @@ export interface NetHandlers {
   /** CLIENT ONLY: a fresh world snapshot arrived from the host. */
   onState: (players: PlayerState[]) => void;
   /** HOST ONLY: a client sent its latest position. */
-  onInput: (id: PeerId, x: number, y: number, vx: number, vy: number) => void;
+  onInput: (id: PeerId, x: number, y: number, vx: number, vy: number, vented: boolean) => void;
   /** The set of currently-locked doors changed. `cooling` doors are open and
    *  cannot be closed again yet (close-cooldown). */
   onDoors: (locked: string[], cooling: string[]) => void;
@@ -74,6 +73,42 @@ export interface NetHandlers {
   onMeetingEnd: () => void;
   /** Fatal/soft networking error, surfaced to the UI. */
   onError: (message: string) => void;
+}
+
+/**
+ * WebRTC ICE configuration built from Vite env vars. When TURN credentials are
+ * provided we force `iceTransportPolicy: "relay"`, so every connection is routed
+ * through the TURN server and no player ever sees another player's IP address.
+ * With no TURN configured it falls back to STUN-only (direct P2P — fine for LAN
+ * / local testing, but does expose IPs and can fail across strict NATs).
+ *
+ * Vars (prefixed VITE_ so Vite inlines them into the client bundle):
+ *   VITE_TURN_URLS        comma-separated, e.g. "turns:host:5349?transport=tcp"
+ *   VITE_TURN_USERNAME    TURN username
+ *   VITE_TURN_CREDENTIAL  TURN credential
+ *   VITE_ICE_RELAY_ONLY   set to "false" to allow direct paths even with TURN
+ */
+function iceConfig(): RTCConfiguration {
+  const env = import.meta.env;
+  const iceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+  const turnUrls = (env.VITE_TURN_URLS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const hasTurn = turnUrls.length > 0;
+  if (hasTurn) {
+    iceServers.push({
+      urls: turnUrls,
+      username: env.VITE_TURN_USERNAME ?? "",
+      credential: env.VITE_TURN_CREDENTIAL ?? "",
+    });
+  }
+
+  // Relay-only whenever TURN is present (unless explicitly opted out) — this is
+  // what actually hides IPs. Without TURN, relay-only would connect to nobody.
+  const relayOnly = hasTurn && env.VITE_ICE_RELAY_ONLY !== "false";
+  return relayOnly ? { iceServers, iceTransportPolicy: "relay" } : { iceServers };
 }
 
 /** How long a sabotaged door stays locked, in ms. */
@@ -149,7 +184,7 @@ export class Net {
   // ---- factories ----
 
   static host(code: string, name: string, color: number, handlers: NetHandlers): Net {
-    const peer = new Peer(peerIdForRoom(code));
+    const peer = new Peer(peerIdForRoom(code), { config: iceConfig() });
     const me: PlayerInfo = { id: "", name, color };
     const net = new Net(true, peer, me, handlers);
 
@@ -166,7 +201,7 @@ export class Net {
   }
 
   static join(code: string, name: string, color: number, handlers: NetHandlers): Net {
-    const peer = new Peer();
+    const peer = new Peer({ config: iceConfig() });
     const me: PlayerInfo = { id: "", name, color };
     const net = new Net(false, peer, me, handlers);
 
@@ -235,9 +270,12 @@ export class Net {
         this.handlers.onLobby(this.playerList());
         break;
       }
-      case "input":
-        this.handlers.onInput(conn.peer, msg.x, msg.y, msg.vx, msg.vy);
+      case "input": {
+        // The host only honors a "vented" (hidden) flag from impostors.
+        const vented = this.roleMap.get(conn.peer) === "impostor" && !!msg.vented;
+        this.handlers.onInput(conn.peer, msg.x, msg.y, msg.vx, msg.vy, vented);
         break;
+      }
       case "sabotage_door":
         // Only impostors may lock doors.
         if (this.roleMap.get(conn.peer) === "impostor") this.lockDoor(msg.doorId);
@@ -492,6 +530,7 @@ export class Net {
   private endMeeting() {
     this.meetingActive = false;
     this.clearMeetingTimers();
+    this.resetDoors(); // doors are open + immediately closable coming out of a meeting
     this.broadcast({ t: "meeting_end" });
     this.handlers.onMeetingEnd();
     this.checkWinCondition();
@@ -590,8 +629,8 @@ export class Net {
       });
     }
 
-    // Doors all start open and on a close-cooldown so they can't be slammed shut instantly.
-    this.startDoorCooldowns();
+    // Doors all start open and immediately closable (no start-of-match cooldown).
+    this.resetDoors();
 
     const myRole = this.roleMap.get(this.myId) ?? "crew";
     this.handlers.onStart(
@@ -605,12 +644,17 @@ export class Net {
     this.broadcastTaskProgress(); // initial 0 / total bar
   }
 
-  /** HOST: put every door on a fresh close-cooldown (used at match start). */
-  private startDoorCooldowns() {
+  /** HOST: clear all door state so every door is open and immediately closable
+   *  (no lingering lock or close-cooldown). Used at match start and after each
+   *  meeting. */
+  private resetDoors() {
+    for (const t of this.doorTimers.values()) clearTimeout(t);
+    this.doorTimers.clear();
     for (const t of this.cooldownTimers.values()) clearTimeout(t);
     this.cooldownTimers.clear();
+    this.lockedDoors.clear();
     this.coolingDoors.clear();
-    for (const door of DOORS) this.openDoor(door.id);
+    this.broadcastDoors();
   }
 
   /** Reset all per-match state so the room can start a fresh round. Keeps the
@@ -704,9 +748,9 @@ export class Net {
   }
 
   /** CLIENT: send our latest predicted position to the host. */
-  sendInput(x: number, y: number, vx: number, vy: number) {
+  sendInput(x: number, y: number, vx: number, vy: number, vented = false) {
     if (this.isHost || !this.hostConn || !this.hostConn.open) return;
-    this.hostConn.send({ t: "input", x, y, vx, vy });
+    this.hostConn.send({ t: "input", x, y, vx, vy, vented });
   }
 
   // ---- shared ----

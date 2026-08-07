@@ -95,13 +95,21 @@ export interface Door extends Area {
   id: string;
 }
 
-/** One door across the middle of each corridor (locking it cuts the passage). */
+/** Where along each corridor its door sits (0 = start, 1 = end). Defaults to
+ *  the middle; overridden per corridor to keep doors out of junctions. */
+const DOOR_FRAC: Record<number, number> = {
+  1: 0.82, // Cafeteria <-> Navigation: push the door toward Navigation, clear of
+           // the Admin corridor junction instead of sitting mid-hallway.
+};
+
+/** One door across each corridor (locking it cuts the passage). */
 const DOORS_BASE: Door[] = CORRIDORS_BASE.map((c, i) => {
   const T = 18; // door thickness along the corridor axis
   const horizontal = c.w >= c.h;
+  const f = DOOR_FRAC[i] ?? 0.5;
   return horizontal
-    ? { id: "d" + i, x: c.x + c.w / 2 - T / 2, y: c.y, w: T, h: c.h }
-    : { id: "d" + i, x: c.x, y: c.y + c.h / 2 - T / 2, w: c.w, h: T };
+    ? { id: "d" + i, x: c.x + c.w * f - T / 2, y: c.y, w: T, h: c.h }
+    : { id: "d" + i, x: c.x, y: c.y + c.h * f - T / 2, w: c.w, h: T };
 });
 
 export const DOORS: Door[] = DOORS_BASE.map((d) => ({

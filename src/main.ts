@@ -55,7 +55,7 @@ const handlers: NetHandlers = {
     void startMatch(spawns, role, impostors, impostorCount, tasks);
   },
   onState: (players) => game?.applyState(players),
-  onInput: (id, x, y, vx, vy) => game?.applyInput(id, x, y, vx, vy),
+  onInput: (id, x, y, vx, vy, vented) => game?.applyInput(id, x, y, vx, vy, vented),
   onDoors: (locked, cooling) => game?.setDoors(locked, cooling),
   onGameOver: (winner) => {
     meeting.close();
