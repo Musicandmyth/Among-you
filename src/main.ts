@@ -233,7 +233,7 @@ function showGameOver(winner: Role) {
   title.style.color = winner === "impostor" ? "#ff5b6e" : "#5b8cff";
   sub.textContent =
     winner === "impostor"
-      ? "Crew were worn down to a 1:2 ratio"
+      ? "Crew were worn down to a 1:1 ratio"
       : "All impostors were defeated";
   el.classList.remove("hidden");
 }

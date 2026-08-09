@@ -378,7 +378,7 @@ export class Net {
   /**
    * HOST: evaluate win conditions over the ALIVE roster.
    *   - crew win: every impostor is dead/gone.
-   *   - impostor win: crew worn down to a 1:2 ratio (crew ≤ 2 × impostors).
+   *   - impostor win: crew worn down to a 1:1 ratio (crew ≤ impostors).
    */
   private checkWinCondition() {
     if (!this.started || this.ended) return;
@@ -390,7 +390,7 @@ export class Net {
       else crew++;
     }
     if (impostors === 0) this.endMatch("crew");
-    else if (crew <= impostors * 2) this.endMatch("impostor");
+    else if (crew <= impostors) this.endMatch("impostor");
   }
 
   private endMatch(winner: Role) {
