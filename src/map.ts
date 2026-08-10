@@ -38,6 +38,7 @@ const ROOMS_BASE: Area[] = [
   { name: "Storage", x: 640, y: 600, w: 320, h: 260 },
   { name: "Admin", x: 1040, y: 560, w: 220, h: 200 },
   { name: "Navigation", x: 1300, y: 220, w: 220, h: 220 },
+  { name: "Security", x: 470, y: 400, w: 150, h: 150 },
 ];
 
 const CORRIDORS_BASE: Area[] = [
@@ -48,6 +49,7 @@ const CORRIDORS_BASE: Area[] = [
   { x: 380, y: 655, w: 320, h: 90 }, // Electrical <-> Storage
   { x: 900, y: 635, w: 200, h: 90 }, // Storage <-> Admin
   { x: 1105, y: 285, w: 90, h: 335 }, // Admin <-> Cafe/Nav corridor
+  { x: 510, y: 500, w: 90, h: 220 }, // Security <-> Electrical/Storage corridor
 ];
 
 const SPAWNS_BASE: { x: number; y: number }[] = [
@@ -88,6 +90,44 @@ export const EMERGENCY_BUTTON = {
   y: ROOMS[0].y + ROOMS[0].h / 2,
 };
 
+// ---- security cameras ----
+
+/** The Security room (holds the camera console). */
+export const SECURITY_ROOM: Area = ROOMS.find((r) => r.name === "Security")!;
+
+/** The camera console — stand next to it to open the camera system. */
+export const SECURITY_CONSOLE = {
+  x: SECURITY_ROOM.x + SECURITY_ROOM.w / 2,
+  y: SECURITY_ROOM.y + SECURITY_ROOM.h * 0.62,
+};
+
+/** A camera feed: a name, the spot it sits/looks from, and which way it faces. */
+export interface CameraDef {
+  name: string;
+  /** Where the camera is mounted (near a hallway wall) and its view is cast from. */
+  eye: { x: number; y: number };
+  /** Unit direction the camera points, from its wall out into the hallway. */
+  dir: { x: number; y: number };
+}
+
+/** Cameras are mounted on the SIDE WALLS of the hallways by each room's entrance,
+ *  looking across the corridor. Authored in base coords (pre-SCALE); each `eye`
+ *  sits just inside the corridor against one wall, `dir` points into the hallway. */
+const CAMERAS_BASE: CameraDef[] = [
+  { name: "Cafeteria", eye: { x: 600, y: 253 }, dir: { x: 0, y: 1 } }, // MedBay–Cafeteria corridor, top wall
+  { name: "MedBay", eye: { x: 470, y: 327 }, dir: { x: 0, y: -1 } }, // MedBay–Cafeteria corridor, bottom wall
+  { name: "Electrical", eye: { x: 327, y: 545 }, dir: { x: -1, y: 0 } }, // MedBay–Electrical corridor, right wall
+  { name: "Storage", eye: { x: 620, y: 663 }, dir: { x: 0, y: 1 } }, // Electrical–Storage corridor, top wall
+  { name: "Admin", eye: { x: 1022, y: 643 }, dir: { x: 0, y: 1 } }, // Storage–Admin corridor, top wall
+  { name: "Navigation", eye: { x: 1282, y: 337 }, dir: { x: 0, y: -1 } }, // Cafeteria–Navigation corridor, bottom wall
+];
+
+export const CAMERAS: CameraDef[] = CAMERAS_BASE.map((c) => ({
+  name: c.name,
+  eye: { x: c.eye.x * SCALE, y: c.eye.y * SCALE },
+  dir: c.dir,
+}));
+
 // ---- doors ----
 
 /** A door blocks the corridor it sits on when locked. */
@@ -100,6 +140,8 @@ export interface Door extends Area {
 const DOOR_FRAC: Record<number, number> = {
   1: 0.82, // Cafeteria <-> Navigation: push the door toward Navigation, clear of
            // the Admin corridor junction instead of sitting mid-hallway.
+  4: 0.3, // Electrical <-> Storage: pull the door left, toward Electrical, so it
+          // sits clear of the Security walkway that joins this corridor.
 };
 
 /** One door across each corridor (locking it cuts the passage). */

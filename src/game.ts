@@ -12,7 +12,11 @@
 
 import { Application, Container, Graphics, Text } from "pixi.js";
 import { Input } from "./input";
-import { WORLD, ROOMS, WALKABLE, DOORS, EMERGENCY_BUTTON, moveWithCollision, rayDistance, type Door } from "./map";
+import {
+  WORLD, ROOMS, WALKABLE, DOORS, EMERGENCY_BUTTON,
+  SECURITY_CONSOLE, CAMERAS, moveWithCollision, rayDistance,
+  type Door,
+} from "./map";
 import { taskById, type TaskDef } from "./tasks";
 import { VENTS, ventById, type VentDef } from "./vents";
 import { TaskUI } from "./taskui";
@@ -35,6 +39,11 @@ const REPORT_RANGE = 90;
 const EMERGENCY_RANGE = 90; // must be this close to the cafeteria button
 const TASK_RANGE = 90; // must be this close to a task console to use it
 const VENT_RANGE = 34; // must be standing on top of the vent grate to drop in
+const SECURITY_RANGE = 110; // must be this close to the camera console to watch
+const VISUAL_MS = 6000; // how long a visual-task animation plays over a player
+// Camera feeds are zoomed in, so you see ~25% less of the surroundings than if
+// you were actually standing there (show ~75% of the extent → 1/0.75 zoom).
+const CAMERA_ZOOM = 1 / 0.75;
 
 const CREW_COLOR = 0x5b8cff;
 const IMPOSTOR_COLOR = 0xff5b6e;
@@ -119,6 +128,16 @@ export class Game {
   private ventNav?: HTMLElement;
   private ventAnims: { g: Graphics; t: number }[] = []; // brief "lid pops open" tweens
 
+  // Visual tasks (e.g. MedBay scan): a scan ring drawn over whoever is doing one,
+  // visible to everyone in sight — the honest "clear" that impostors can't fake.
+  private visualGfx = new Map<PeerId, { g: Graphics; t: number }>();
+
+  // Security cameras (open at the Security console, key C). Watching relocates
+  // the viewport to a camera's spot; ← / → cycle feeds, one at a time.
+  private camsOpen = false;
+  private camIndex = 0;
+  private camHud?: HTMLElement;
+
   // Action buttons (DOM).
   private btnKill?: HTMLButtonElement;
   private btnReport?: HTMLButtonElement;
@@ -185,11 +204,19 @@ export class Game {
       // Don't let hotkeys fire while typing in a text field (e.g. meeting chat).
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // While watching cameras, arrow keys cycle between feeds.
+      if (this.camsOpen && e.key.startsWith("Arrow")) {
+        if (e.key === "ArrowLeft" || e.key === "ArrowUp") this.switchCamera(-1);
+        else if (e.key === "ArrowRight" || e.key === "ArrowDown") this.switchCamera(1);
+        e.preventDefault();
+        return;
+      }
       if (e.key === "e" || e.key === "E") this.toggleMap();
       if (e.key === "k" || e.key === "K") this.tryKill();
       if (e.key === "r" || e.key === "R") this.tryReport();
       if (e.key === "f" || e.key === "F") this.tryEmergency();
       if (e.key === "q" || e.key === "Q") this.tryVent();
+      if (e.key === "c" || e.key === "C") this.tryToggleCameras();
     };
     window.addEventListener("keydown", this.keyHandler);
 
@@ -235,6 +262,49 @@ export class Game {
     }
 
     this.drawEmergencyButton();
+    this.drawSecurityConsole();
+    this.drawCameraIcons();
+  }
+
+  /** The camera console in the Security room — stand next to it and press C to
+   *  bring up the camera system. */
+  private drawSecurityConsole() {
+    const { x, y } = SECURITY_CONSOLE;
+    const g = new Graphics();
+    g.roundRect(x - 40, y - 22, 80, 44, 6).fill(0x14203a).stroke({ width: 4, color: 0x39456e });
+    // three little monitors
+    for (let i = -1; i <= 1; i++) {
+      g.roundRect(x + i * 25 - 10, y - 14, 20, 16, 2).fill(0x0c3a2a).stroke({ width: 2, color: 0x3ddc84 });
+    }
+    this.scene.addChild(g);
+
+    const label = new Text({
+      text: "CAMERAS",
+      style: { fill: 0x6fe3b0, fontSize: 12, fontWeight: "800", fontFamily: "system-ui, sans-serif", letterSpacing: 1 },
+    });
+    label.anchor.set(0.5);
+    label.position.set(x, y + 34);
+    this.scene.addChild(label);
+  }
+
+  /** Little wall-mounted cameras in the hallways, drawn as map decor: a bracket
+   *  flush to the wall, an arm, and a body whose lens points into the hallway. */
+  private drawCameraIcons() {
+    for (const cam of CAMERAS) {
+      const { x, y } = cam.eye;
+      const dx = cam.dir.x;
+      const dy = cam.dir.y;
+      const g = new Graphics();
+      // mount bracket, set back against the wall (opposite the facing direction)
+      const mx = x - dx * 12;
+      const my = y - dy * 12;
+      g.circle(mx, my, 5).fill(0x2a3358).stroke({ width: 2, color: 0x6f7bad });
+      g.moveTo(mx, my).lineTo(x, y).stroke({ width: 3, color: 0x6f7bad }); // arm
+      // camera body, hanging into the hallway
+      g.roundRect(x - 8, y - 6, 16, 12, 3).fill(0x2a3358).stroke({ width: 2, color: 0x6f7bad });
+      g.circle(x + dx * 7, y + dy * 7, 3).fill(0xff5b6e); // lens, pointing inward
+      this.scene.addChild(g);
+    }
   }
 
   /** The emergency-meeting console at the center of the Cafeteria — the only
@@ -315,7 +385,11 @@ export class Game {
     this.updateActionButtons();
     this.updateTaskMarkers();
     this.updateVentAnims(dt);
+    this.updateVisualAnims(dt);
     if (this.mapOpen) this.updateMapMarker();
+    // Dying closes the feed. (The player is held at the console while watching,
+    // so they can't wander out of range.)
+    if (this.camsOpen && !this.local.alive) this.closeCameras();
   }
 
   /** Ghosts (dead players) are visible only to other ghosts; a vented impostor
@@ -334,7 +408,7 @@ export class Game {
   }
 
   private simulateLocal(dt: number) {
-    const held = this.frozen || this.vented; // no walking during meetings or in a vent
+    const held = this.frozen || this.vented || this.camsOpen; // no walking during meetings, in a vent, or while watching cameras
     let dirX = 0;
     let dirY = 0;
     if (!held) {
@@ -411,24 +485,37 @@ export class Game {
   private updateCamera() {
     const halfW = this.app.screen.width / 2;
     const halfH = this.app.screen.height / 2;
-    let camX = halfW - this.local.x;
-    let camY = halfH - this.local.y;
-    camX = clamp(camX, Math.min(0, this.app.screen.width - WORLD.width), 0);
-    camY = clamp(camY, Math.min(0, this.app.screen.height - WORLD.height), 0);
+    // When watching cameras, the viewport looks from the camera's spot instead
+    // of following the local player, and zooms in so you see ~25% less.
+    const scale = this.camsOpen ? CAMERA_ZOOM : 1;
+    this.camera.scale.set(scale);
+    const focus = this.camsOpen ? this.camEye() : this.local;
+    let camX = halfW - focus.x * scale;
+    let camY = halfH - focus.y * scale;
+    camX = clamp(camX, Math.min(0, this.app.screen.width - WORLD.width * scale), 0);
+    camY = clamp(camY, Math.min(0, this.app.screen.height - WORLD.height * scale), 0);
     this.camera.position.set(camX, camY);
   }
 
   private updateVision() {
-    // Ghosts see the whole ship (no fog): drop the vision mask once dead.
-    if (!this.local.alive) {
+    // Ghosts see the whole ship (no fog): drop the vision mask once dead. But
+    // while watching cameras we always cast from the camera's spot, so the mask
+    // stays on and re-attaches if it was dropped.
+    if (!this.local.alive && !this.camsOpen) {
       if (this.scene.mask) {
         this.scene.mask = null;
         this.visionMask.visible = false;
       }
       return;
     }
-    const px = this.local.x;
-    const py = this.local.y;
+    if (this.camsOpen && this.scene.mask !== this.visionMask) {
+      this.scene.mask = this.visionMask;
+      this.visionMask.visible = true;
+    }
+    // Sight is cast from the camera when watching, otherwise from the player.
+    const origin = this.camsOpen ? this.camEye() : this.local;
+    const px = origin.x;
+    const py = origin.y;
     const pts: number[] = [];
     for (let i = 0; i < VISION_RAYS; i++) {
       const ang = (i / VISION_RAYS) * Math.PI * 2;
@@ -453,6 +540,9 @@ export class Game {
 
   private redrawDoors() {
     this.doorGfx.clear();
+    // Crew don't see doors on the walking stage at all — only impostors (who
+    // control them) get to see which doors are open, locked, or cooling down.
+    if (this.role !== "impostor") return;
     for (const d of DOORS) {
       if (this.lockedDoors.has(d.id)) {
         this.doorGfx.rect(d.x, d.y, d.w, d.h).fill(0xff5b6e).stroke({ width: 3, color: 0x7a1622 });
@@ -562,6 +652,9 @@ export class Game {
   private tryOpenTask(task: TaskDef) {
     if (this.doneTasks.has(task.id) || this.frozen || this.taskUI.isOpen()) return;
     if (dist2(this.local.x, this.local.y, task.x, task.y) > TASK_RANGE * TASK_RANGE) return;
+    // A visual task announces itself: the host validates and broadcasts, so
+    // everyone (including us) sees the scan play out over our avatar.
+    if (task.visual) this.net.requestVisual(task.id);
     this.taskUI.open(task, () => this.completeTask(task.id));
   }
 
@@ -747,6 +840,111 @@ export class Game {
     this.ventNav = undefined;
   }
 
+  // ---- visual tasks (MedBay scan) ----
+
+  /** A player started a visual task: play a scan animation over them that
+   *  everyone in sight can watch. This is the honest "clear" — impostors can't
+   *  trigger it (the host rejects their request). */
+  applyVisual(player: PeerId, _taskId: string) {
+    const existing = this.visualGfx.get(player);
+    if (existing) { existing.t = 0; return; } // restart if already scanning
+    const g = new Graphics();
+    // Above the floor/grid, below avatars — clipped by the vision mask, so an
+    // observer only sees the scan if the scanner is actually in their sight.
+    this.scene.addChildAt(g, this.scene.getChildIndex(this.doorGfx) + 1);
+    this.visualGfx.set(player, { g, t: 0 });
+  }
+
+  /** Tear down any in-progress scan visuals (e.g. when a meeting starts). */
+  private clearVisuals() {
+    for (const anim of this.visualGfx.values()) {
+      this.scene.removeChild(anim.g);
+      anim.g.destroy();
+    }
+    this.visualGfx.clear();
+  }
+
+  private updateVisualAnims(dt: number) {
+    for (const [id, anim] of this.visualGfx) {
+      anim.t += dt * 1000;
+      const av = this.avatars.get(id);
+      if (!av || anim.t >= VISUAL_MS || av.vented) {
+        this.scene.removeChild(anim.g);
+        anim.g.destroy();
+        this.visualGfx.delete(id);
+        continue;
+      }
+      anim.g.position.set(av.x, av.y);
+      drawScanFx(anim.g, anim.t);
+    }
+  }
+
+  // ---- security cameras (open at the console with C) ----
+  //
+  // A camera simply relocates the player's viewport to the camera's spot, so the
+  // live scene renders from there (vision cast from the camera, not the player).
+  // Only one feed shows at a time; ← / → cycle between them. The player stays put
+  // at the console (frozen) while watching.
+
+  /** C: toggle the cameras, but only at the Security console. */
+  private tryToggleCameras() {
+    if (this.camsOpen) { this.closeCameras(); return; }
+    if (this.frozen || !this.local.alive) return;
+    if (!this.nearSecurityConsole()) return;
+    this.camsOpen = true;
+    this.camIndex = 0;
+    this.showCamHud();
+    this.updateCamHud();
+  }
+
+  private closeCameras() {
+    if (!this.camsOpen) return;
+    this.camsOpen = false;
+    this.camHud?.classList.add("hidden");
+  }
+
+  /** ← / → move to the previous / next camera feed (wraps around). */
+  private switchCamera(dir: 1 | -1) {
+    if (!this.camsOpen || CAMERAS.length === 0) return;
+    this.camIndex = (this.camIndex + dir + CAMERAS.length) % CAMERAS.length;
+    this.updateCamHud();
+  }
+
+  /** The current camera's eye — the world point the viewport looks from. */
+  private camEye(): { x: number; y: number } {
+    return CAMERAS[this.camIndex]?.eye ?? this.local;
+  }
+
+  private showCamHud() {
+    if (!this.camHud) {
+      this.camHud = document.createElement("div");
+      this.camHud.id = "cam-hud";
+      this.camHud.className = "cam-hud";
+      this.camHud.innerHTML = `
+        <div class="cam-scanlines"></div>
+        <div class="cam-top">
+          <span class="cam-rec">● REC</span>
+          <span id="cam-name" class="cam-name">CAM</span>
+        </div>
+        <div class="cam-help">◄ ►  switch camera　·　C  exit</div>`;
+      document.body.appendChild(this.camHud);
+    }
+    this.camHud.classList.remove("hidden");
+  }
+
+  private updateCamHud() {
+    const nameEl = this.camHud?.querySelector("#cam-name");
+    if (nameEl) {
+      const cam = CAMERAS[this.camIndex];
+      nameEl.textContent = `CAM ${this.camIndex + 1}/${CAMERAS.length} · ${cam?.name ?? ""}`;
+    }
+  }
+
+  private nearSecurityConsole(): boolean {
+    return dist2(this.local.x, this.local.y, SECURITY_CONSOLE.x, SECURITY_CONSOLE.y)
+      <= SECURITY_RANGE * SECURITY_RANGE;
+  }
+
   private updateActionButtons() {
     if (this.btnKill) {
       const show = this.role === "impostor" && this.local.alive && !this.vented;
@@ -848,15 +1046,17 @@ export class Game {
       this.mapPanel.addChild(t);
     }
 
-    // Doors on the SAME map. Impostors can tap them to lock (sabotage).
-    for (const d of DOORS) {
-      const dx = (d.x - minX) * scale;
-      const dy = (d.y - minY) * scale;
-      const dw = Math.max(8, d.w * scale);
-      const dh = Math.max(8, d.h * scale);
-      this.mapDoorRects.set(d.id, [dx, dy, dw, dh]);
-      const g = new Graphics();
-      if (impostor) {
+    // Doors on the SAME map — IMPOSTOR ONLY. They can tap them to lock
+    // (sabotage). Crew get no door markers here either, so they never see which
+    // doors are open or closing.
+    if (impostor) {
+      for (const d of DOORS) {
+        const dx = (d.x - minX) * scale;
+        const dy = (d.y - minY) * scale;
+        const dw = Math.max(8, d.w * scale);
+        const dh = Math.max(8, d.h * scale);
+        this.mapDoorRects.set(d.id, [dx, dy, dw, dh]);
+        const g = new Graphics();
         g.eventMode = "static";
         g.cursor = "pointer";
         // A door on close-cooldown (recently opened) can't be closed yet.
@@ -864,11 +1064,11 @@ export class Game {
           if (this.coolingDoors.has(d.id)) return;
           this.net.requestSabotageDoor(d.id);
         });
+        this.mapPanel.addChild(g);
+        this.mapDoorGfx.set(d.id, g);
       }
-      this.mapPanel.addChild(g);
-      this.mapDoorGfx.set(d.id, g);
+      this.refreshMapDoors();
     }
-    this.refreshMapDoors();
 
     // Crew: mark each task with a "!" on the minimap.
     for (const task of this.myTasks) {
@@ -957,6 +1157,8 @@ export class Game {
   onMeetingStart() {
     this.frozen = true;
     if (this.vented) this.exitVent(); // meetings eject you from a vent
+    this.closeCameras();
+    this.clearVisuals();
     this.clearBodies();
     this.taskUI.close();
     // Everyone gathers in a ring around the emergency button in the Cafeteria.
@@ -1056,6 +1258,7 @@ export class Game {
     document.getElementById("actions")?.classList.add("hidden");
     document.getElementById("role-badge")?.remove();
     this.clearVentNav();
+    this.camHud?.remove();
     this.taskUI.dispose();
     this.app.destroy(true, { children: true });
   }
@@ -1093,6 +1296,34 @@ function drawVent(g: Graphics, active: boolean) {
   for (let i = -1; i <= 1; i++) {
     g.roundRect(-w / 2 + 7, i * 9 - 3, w - 14, 6, 2).fill(slat);
   }
+}
+
+/** Draw the visual-task scan effect around a player's origin, animated by `t`
+ *  (ms). A bracketed frame plus a scan line sweeping up and down the body. */
+function drawScanFx(g: Graphics, t: number) {
+  const cyan = 0x3ddce0;
+  const half = 40;
+  g.clear();
+  // corner brackets
+  const c = 30;
+  const corners: [number, number, number, number][] = [
+    [-half, -half, 1, 1], [half, -half, -1, 1],
+    [-half, half, 1, -1], [half, half, -1, -1],
+  ];
+  for (const [x, y, sx, sy] of corners) {
+    g.moveTo(x, y).lineTo(x + sx * c, y);
+    g.moveTo(x, y).lineTo(x, y + sy * c);
+  }
+  g.stroke({ width: 3, color: cyan, alpha: 0.9 });
+  // sweeping scan line (triangle wave over the body height)
+  const period = 1400;
+  const phase = (t % period) / period; // 0..1
+  const tri = phase < 0.5 ? phase * 2 : 2 - phase * 2; // 0..1..0
+  const ly = -half + tri * half * 2;
+  g.moveTo(-half, ly).lineTo(half, ly).stroke({ width: 2, color: cyan, alpha: 0.85 });
+  // faint pulsing halo
+  const pulse = 0.25 + 0.15 * Math.sin(t / 160);
+  g.circle(0, 4, half + 6).fill({ color: cyan, alpha: pulse * 0.25 });
 }
 
 /** Pick an arrow glyph pointing from (ax,ay) toward (bx,by). */
