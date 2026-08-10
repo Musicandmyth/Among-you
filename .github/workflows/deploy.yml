@@ -1,0 +1,68 @@
+name: Deploy to GitHub Pages
+
+# THE ONLY Pages workflow. It builds the Vite client and publishes dist/ on every
+# push to main. Do NOT re-add GitHub's suggested "Jekyll" or "Static HTML"
+# starter workflows: those deploy the UNBUILT repo source (index.html ->
+# /src/main.ts), which the browser blocks (MIME video/mp2t) so no JS runs and the
+# page looks dead. Two Pages workflows also race for the github-pages environment.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Use `npm install` (not `npm ci`): the committed lockfile was generated on
+      # Windows and can omit the Linux-only rollup/esbuild native binaries, which
+      # would break `npm ci` on the Ubuntu runner. install re-resolves them.
+      - name: Install dependencies
+        run: npm install
+
+      # Optional TURN credentials come from repo secrets; if unset the build falls
+      # back to STUN-only direct P2P. (Relay-only is disabled in code — see net.ts.)
+      - name: Build
+        run: npm run build
+        env:
+          VITE_TURN_URLS: ${{ secrets.VITE_TURN_URLS }}
+          VITE_TURN_USERNAME: ${{ secrets.VITE_TURN_USERNAME }}
+          VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
