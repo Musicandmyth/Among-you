@@ -119,10 +119,16 @@ function iceConfig(): RTCConfiguration {
     });
   }
 
-  // Relay-only is explicit opt-in AND requires TURN to be present, otherwise it
-  // would discard every candidate and connect to nobody.
-  const relayOnly = turnUrls.length > 0 && env.VITE_ICE_RELAY_ONLY === "true";
-  return relayOnly ? { iceServers, iceTransportPolicy: "relay" } : { iceServers };
+  // IMPORTANT: never force relay-only (iceTransportPolicy: "relay"). It routes
+  // ALL peer traffic through TURN, so any TURN misconfiguration — e.g. leftover
+  // placeholder credentials in the deployed build's secrets — silently severs
+  // every connection, even though local dev (which has no secrets) keeps working.
+  // That exact mismatch has broken the GitHub Pages build before. STUN gives
+  // direct P2P out of the box and the TURN entry above is a NON-exclusive
+  // fallback, so connections always have a path. (True IP-hiding via forced relay
+  // is only safe with a verified, always-on TURN server; re-enable it here only
+  // once you have one — VITE_ICE_RELAY_ONLY is intentionally ignored otherwise.)
+  return { iceServers };
 }
 
 /**
