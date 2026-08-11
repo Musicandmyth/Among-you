@@ -143,6 +143,11 @@ function peerOptions(): PeerOptions {
   return opts;
 }
 
+/** How long to wait for the peer to open (reach the signaling broker) before
+ *  surfacing a clear error, in ms. Kept short so a blocked/unreachable broker
+ *  fails fast instead of leaving the Create/Join button stuck on "Connecting…". */
+const OPEN_TIMEOUT_MS = 8_000;
+
 /** How long a sabotaged door stays locked, in ms. */
 const DOOR_LOCK_MS = 10_000;
 /** After a door opens, it cannot be closed again for this long. */
@@ -273,8 +278,11 @@ export class Net {
   private armOpenWatchdog() {
     this.openTimer = setTimeout(() => {
       if (this.disposed) return;
-      this.handlers.onError("Couldn't reach the signaling server. Check your connection and try again.");
-    }, 15_000);
+      this.handlers.onError(
+        "Couldn't reach the matchmaking server. An ad/tracker blocker or firewall may be blocking it — " +
+          "allow this site (or host your own PeerServer via VITE_PEER_HOST; see README), then try again.",
+      );
+    }, OPEN_TIMEOUT_MS);
   }
 
   private clearOpenWatchdog() {
@@ -319,6 +327,7 @@ export class Net {
             impostors: role === "impostor" ? this.impostorIds : [],
             impostorCount: this.impostorIds.length,
             tasks: this.taskAssign.get(conn.peer) ?? [],
+            rules: this.rules, // late joiners need the rules too, or game.start() crashes
           });
           conn.send({ t: "doors", locked: [...this.lockedDoors], cooling: [...this.coolingDoors] });
           const { done, total } = this.taskCounts();
