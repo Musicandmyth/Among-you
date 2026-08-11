@@ -408,6 +408,26 @@ input[type="text"]:focus { border-color: var(--accent); }
   text-align: center;
   color: rgba(111, 227, 176, 0.85); font-size: 13px; letter-spacing: 1px;
 }
+.cam-controls {
+  position: absolute; bottom: 16px; left: 0; right: 0;
+  display: flex; justify-content: center; gap: 12px;
+  pointer-events: auto; /* the HUD itself is click-through; these buttons are not */
+}
+.cam-btn {
+  min-width: 46px;
+  padding: 9px 16px;
+  border-radius: 9px;
+  border: 1px solid rgba(61, 220, 224, 0.55);
+  background: rgba(6, 20, 24, 0.85);
+  color: #6fe3b0;
+  font-size: 15px; font-weight: 800; letter-spacing: 1px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.cam-btn:hover { background: rgba(12, 40, 46, 0.95); border-color: #3ddce0; }
+.cam-btn:active { transform: translateY(1px); }
+.cam-exit { color: #ffd7dc; border-color: rgba(255, 91, 110, 0.55); }
+.cam-exit:hover { border-color: #ff5b6e; }
 
 /* Meeting overlay. */
 .meeting-card {

@@ -81,6 +81,7 @@ interface Avatar {
 
 interface Body {
   container: Container;
+  reportBtn: Container; // floating "REPORT" button above the body (click to report)
   x: number;
   y: number;
 }
@@ -163,10 +164,8 @@ export class Game {
   // (the host is authoritative). Set at round start and after a repair.
   private lightsReadyAt = 0;
 
-  // Action buttons (DOM).
+  // Action buttons (DOM). Report + emergency are in-world click targets now.
   private btnKill?: HTMLButtonElement;
-  private btnReport?: HTMLButtonElement;
-  private btnEmergency?: HTMLButtonElement;
   private btnVent?: HTMLButtonElement;
 
   private sendAcc = 0;
@@ -237,13 +236,10 @@ export class Game {
         e.preventDefault();
         return;
       }
+      // Cameras, lights, vents, reporting, and emergencies are click-driven now
+      // (in-world consoles / buttons / the report pill above a body).
       if (e.key === "e" || e.key === "E") this.toggleMap();
       if (e.key === "k" || e.key === "K") this.tryKill();
-      if (e.key === "r" || e.key === "R") this.tryReport();
-      if (e.key === "f" || e.key === "F") this.tryEmergency();
-      if (e.key === "q" || e.key === "Q") this.tryVent();
-      if (e.key === "c" || e.key === "C") this.tryToggleCameras();
-      if (e.key === "l" || e.key === "L") this.tryOpenLights();
     };
     window.addEventListener("keydown", this.keyHandler);
 
@@ -299,6 +295,9 @@ export class Game {
    *  is redrawn by setLights() so it glows red while power is out. */
   private drawLightsConsole() {
     this.scene.addChild(this.lightsConsoleGfx);
+    this.lightsConsoleGfx.eventMode = "static";
+    this.lightsConsoleGfx.cursor = "pointer";
+    this.lightsConsoleGfx.on("pointertap", () => this.tryOpenLights()); // click to repair
     this.redrawLightsConsole();
 
     const label = new Text({
@@ -337,6 +336,9 @@ export class Game {
     for (let i = -1; i <= 1; i++) {
       g.roundRect(x + i * 25 - 10, y - 14, 20, 16, 2).fill(0x0c3a2a).stroke({ width: 2, color: 0x3ddc84 });
     }
+    g.eventMode = "static";
+    g.cursor = "pointer";
+    g.on("pointertap", () => this.tryToggleCameras()); // click the console to open/close cameras
     this.scene.addChild(g);
 
     const label = new Text({
@@ -375,6 +377,9 @@ export class Game {
     g.circle(x, y, 24).fill(0xff5b6e).stroke({ width: 4, color: 0x7a1622 }); // red button
     g.roundRect(x - 12, y - 4, 24, 8, 3).fill(0xffd23d); // ! bar
     g.circle(x, y + 12, 3).fill(0xffd23d); // ! dot
+    g.eventMode = "static";
+    g.cursor = "pointer";
+    g.on("pointertap", () => this.tryEmergency()); // click the button to call a meeting
     this.scene.addChild(g);
 
     const label = new Text({
@@ -443,6 +448,7 @@ export class Game {
     this.updateVision();
     this.updateVisibility();
     this.updateActionButtons();
+    this.updateReportButtons();
     this.updateTaskMarkers();
     this.updateVentAnims(dt);
     if (this.mapOpen) { this.updateMapMarker(); this.refreshMapLights(); }
@@ -731,9 +737,59 @@ export class Game {
     const bone = new Graphics();
     bone.circle(10, -6, 4).fill(0xffffff);
     container.addChild(bone);
+
+    // Floating REPORT button above the body — shown only when a living player is
+    // in range (see updateReportButtons); click it to call the meeting.
+    const reportBtn = this.makeReportButton(bodyId);
+    reportBtn.visible = false;
+    container.addChild(reportBtn);
+
     container.position.set(x, y);
     this.scene.addChildAt(container, this.scene.getChildIndex(this.doorGfx) + 1);
-    this.bodies.set(bodyId, { container, x, y });
+    this.bodies.set(bodyId, { container, reportBtn, x, y });
+  }
+
+  /** A clickable "REPORT" pill that floats above a body. */
+  private makeReportButton(bodyId: string): Container {
+    const btn = new Container();
+    btn.position.set(0, -46);
+    btn.scale.set(ENTITY_SCALE); // keep it a readable size despite the viewport zoom
+    btn.eventMode = "static";
+    btn.cursor = "pointer";
+
+    const w = 96, h = 34;
+    const bg = new Graphics();
+    bg.roundRect(-w / 2, -h / 2, w, h, 9).fill(0xff5b6e).stroke({ width: 2.5, color: 0x7a1622 });
+    // little exclamation so it reads at a glance
+    bg.roundRect(-w / 2 + 12 - 2, -8, 4, 11, 2).fill(0x05070f);
+    bg.circle(-w / 2 + 12, 7, 2.4).fill(0x05070f);
+    btn.addChild(bg);
+
+    const label = new Text({
+      text: "REPORT",
+      style: { fill: 0xffffff, fontSize: 15, fontWeight: "800", fontFamily: "system-ui, sans-serif", letterSpacing: 1 },
+    });
+    label.anchor.set(0.5);
+    label.position.set(6, 0);
+    btn.addChild(label);
+
+    btn.on("pointertap", () => {
+      if (!this.local.alive || this.frozen) return;
+      if (dist2(this.local.x, this.local.y, this.bodies.get(bodyId)?.x ?? 0, this.bodies.get(bodyId)?.y ?? 0)
+        > REPORT_RANGE * REPORT_RANGE) return;
+      this.net.requestReport(bodyId);
+    });
+    return btn;
+  }
+
+  /** Show each body's REPORT button only while a living, unfrozen player is in
+   *  reach of it. */
+  private updateReportButtons() {
+    const canReport = this.local.alive && !this.frozen;
+    for (const b of this.bodies.values()) {
+      b.reportBtn.visible =
+        canReport && dist2(this.local.x, this.local.y, b.x, b.y) <= REPORT_RANGE * REPORT_RANGE;
+    }
   }
 
   private clearBodies() {
@@ -753,12 +809,6 @@ export class Game {
     if (!victim) return;
     this.net.requestKill(victim.info.id, victim.x, victim.y);
     this.killReadyAt = now() + this.killCooldownMs;
-  }
-
-  private tryReport() {
-    if (!this.local.alive || this.frozen) return;
-    const bodyId = this.nearestBody();
-    if (bodyId) this.net.requestReport(bodyId);
   }
 
   private tryEmergency() {
@@ -782,16 +832,6 @@ export class Game {
       if (this.impostors.has(av.info.id)) continue; // don't target fellow impostors
       const d = dist2(this.local.x, this.local.y, av.x, av.y);
       if (d < bestD) { bestD = d; best = av; }
-    }
-    return best;
-  }
-
-  private nearestBody(): string | null {
-    let best: string | null = null;
-    let bestD = REPORT_RANGE * REPORT_RANGE;
-    for (const [id, b] of this.bodies) {
-      const d = dist2(this.local.x, this.local.y, b.x, b.y);
-      if (d < bestD) { bestD = d; best = id; }
     }
     return best;
   }
@@ -1051,8 +1091,15 @@ export class Game {
           <span class="cam-rec">● REC</span>
           <span id="cam-name" class="cam-name">CAM</span>
         </div>
-        <div class="cam-help">◄ ►  switch camera　·　C  exit</div>`;
+        <div class="cam-controls">
+          <button id="cam-prev" class="cam-btn" aria-label="Previous camera">◄</button>
+          <button id="cam-exit" class="cam-btn cam-exit">Exit</button>
+          <button id="cam-next" class="cam-btn" aria-label="Next camera">►</button>
+        </div>`;
       document.body.appendChild(this.camHud);
+      this.camHud.querySelector("#cam-prev")!.addEventListener("click", () => this.switchCamera(-1));
+      this.camHud.querySelector("#cam-next")!.addEventListener("click", () => this.switchCamera(1));
+      this.camHud.querySelector("#cam-exit")!.addEventListener("click", () => this.closeCameras());
     }
     this.camHud.classList.remove("hidden");
   }
@@ -1082,29 +1129,8 @@ export class Game {
         this.btnKill.textContent = remain > 0 ? `Kill ${remain}s` : "Kill";
       }
     }
-    if (this.btnReport) {
-      const show = this.local.alive && !this.vented;
-      this.btnReport.style.display = show ? "" : "none";
-      if (show) this.btnReport.disabled = this.frozen || this.nearestBody() === null;
-    }
-    if (this.btnEmergency) {
-      const show = this.local.alive && !this.vented;
-      this.btnEmergency.style.display = show ? "" : "none";
-      if (show) {
-        const outOfMeetings = this.emergenciesUsed >= this.emergenciesPerPlayer;
-        const cooldown = Math.ceil((this.emergencyReadyAt - now()) / 1000);
-        const near = this.nearEmergencyButton();
-        this.btnEmergency.disabled =
-          this.frozen || outOfMeetings || cooldown > 0 || !near;
-        this.btnEmergency.textContent = outOfMeetings
-          ? "No meetings"
-          : cooldown > 0
-            ? `Wait ${cooldown}s`
-            : near
-              ? "Emergency"
-              : "Go to button";
-      }
-    }
+    // Reporting and emergencies are click targets in the world now (the REPORT
+    // pill above a body, and the Cafeteria emergency button), not corner buttons.
     if (this.btnVent) {
       const show = this.role === "impostor" && this.local.alive;
       this.btnVent.style.display = show ? "" : "none";
@@ -1118,13 +1144,9 @@ export class Game {
 
   private wireActionButtons() {
     this.btnKill = document.getElementById("btn-kill") as HTMLButtonElement | null ?? undefined;
-    this.btnReport = document.getElementById("btn-report") as HTMLButtonElement | null ?? undefined;
-    this.btnEmergency = document.getElementById("btn-emergency") as HTMLButtonElement | null ?? undefined;
     this.btnVent = document.getElementById("btn-vent") as HTMLButtonElement | null ?? undefined;
     document.getElementById("actions")?.classList.remove("hidden");
     this.btnKill?.addEventListener("click", () => this.tryKill());
-    this.btnReport?.addEventListener("click", () => this.tryReport());
-    this.btnEmergency?.addEventListener("click", () => this.tryEmergency());
     this.btnVent?.addEventListener("click", () => this.tryVent());
   }
 

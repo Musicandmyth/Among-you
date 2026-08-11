@@ -56,7 +56,7 @@
 
     <div id="hud" class="hud hidden">
       <span id="hud-room"></span>
-      <span class="hud-hint">WASD move · E map · C cameras · L lights · K kill · R report · F emergency · Q vent (impostor)</span>
+      <span class="hud-hint">WASD move · E map · K kill · click consoles, vents &amp; the report/emergency buttons to interact</span>
     </div>
 
     <!-- Global task progress bar. -->
@@ -65,10 +65,9 @@
       <div class="taskbar-track"><div id="taskbar-fill" class="taskbar-fill"></div></div>
     </div>
 
-    <!-- In-game action buttons. -->
+    <!-- In-game action buttons. Report + emergency are in-world click targets
+         (the pill above a body and the Cafeteria button). -->
     <div id="actions" class="actions-bar hidden">
-      <button id="btn-report" class="action">Report</button>
-      <button id="btn-emergency" class="action">Emergency</button>
       <button id="btn-vent" class="action vent">Vent</button>
       <button id="btn-kill" class="action kill">Kill</button>
     </div>
