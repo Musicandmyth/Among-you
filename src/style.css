@@ -370,6 +370,45 @@ input[type="text"]:focus { border-color: var(--accent); }
   color: #ffd7dc;
 }
 
+/* Security camera feed HUD — a monitor frame laid over the relocated viewport. */
+.cam-hud {
+  position: fixed; inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  border: 3px solid rgba(61, 220, 224, 0.5);
+  box-shadow: inset 0 0 120px rgba(0, 0, 0, 0.75);
+  font-family: ui-monospace, Consolas, monospace;
+}
+.cam-hud.hidden { display: none; }
+.cam-scanlines {
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.16) 3px
+  );
+  mix-blend-mode: multiply;
+}
+.cam-top {
+  position: absolute; top: 18px; left: 22px; right: 22px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.cam-rec {
+  color: #ff5b6e; font-weight: 800; font-size: 15px; letter-spacing: 1px;
+  animation: cam-blink 1.1s steps(1) infinite;
+}
+@keyframes cam-blink { 50% { opacity: 0.25; } }
+.cam-name {
+  color: #6fe3b0; font-weight: 800; font-size: 15px; letter-spacing: 2px;
+  text-shadow: 0 0 8px rgba(61, 220, 224, 0.5);
+}
+.cam-help {
+  position: absolute; bottom: 18px; left: 0; right: 0;
+  text-align: center;
+  color: rgba(111, 227, 176, 0.85); font-size: 13px; letter-spacing: 1px;
+}
+
 /* Meeting overlay. */
 .meeting-card {
   width: min(720px, 94vw);
