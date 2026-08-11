@@ -295,5 +295,5 @@ export function generateRoomCode(rand: () => number): string {
 
 /** PeerJS id used for a given room code (namespaced to avoid broker collisions). */
 export function peerIdForRoom(code: string): string {
-  return `amongourselves-${code.toLowerCase()}`;
+  return `amongyou-${code.toLowerCase()}`;
 }

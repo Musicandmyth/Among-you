@@ -1,6 +1,6 @@
 @echo off
 setlocal
-rem --- Among Ourselves: start the client (P2P host/join happens inside it) ---
+rem --- Among You: start the client (P2P host/join happens inside it) ---
 cd /d "%~dp0"
 
 rem Ensure Node.js is on PATH (winget installs to %ProgramFiles%\nodejs).

@@ -1,4 +1,4 @@
-# Among Ourselves
+# Among You
 
 An online multiplayer social-deduction demo (lobby + movement) that runs entirely
 peer-to-peer in the browser via [PeerJS](https://peerjs.com/) (WebRTC). One player

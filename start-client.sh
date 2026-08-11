@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# --- Among Ourselves: start the client (P2P host/join happens inside it) ---
+# --- Among You: start the client (P2P host/join happens inside it) ---
 # Linux / macOS counterpart of start-client.bat.
 set -e
 
