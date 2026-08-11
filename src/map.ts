@@ -101,6 +101,16 @@ export const SECURITY_CONSOLE = {
   y: SECURITY_ROOM.y + SECURITY_ROOM.h * 0.62,
 };
 
+/** The Electrical room (holds the lights control panel). */
+export const ELECTRICAL_ROOM: Area = ROOMS.find((r) => r.name === "Electrical")!;
+
+/** The lights control panel — stand next to it and press L to open the repair
+ *  switches after a lights sabotage. */
+export const LIGHTS_CONSOLE = {
+  x: ELECTRICAL_ROOM.x + ELECTRICAL_ROOM.w / 2,
+  y: ELECTRICAL_ROOM.y + ELECTRICAL_ROOM.h * 0.66,
+};
+
 /** A camera feed: a name, the spot it sits/looks from, and which way it faces. */
 export interface CameraDef {
   name: string;

@@ -123,6 +123,37 @@ export interface SabotageDoorMsg {
   doorId: string;
 }
 
+/** How many switches the lights-repair panel has (all must be ON to restore). */
+export const LIGHT_SWITCH_COUNT = 5;
+
+/** Lights sabotage cooldowns (ms). The impostor can't trigger lights until this
+ *  long after a round starts (match start + each meeting end), and again after a
+ *  repair. Enforced by the host; mirrored on the impostor's tablet for feedback. */
+export const LIGHTS_START_COOLDOWN_MS = 10_000;
+export const LIGHTS_REPAIR_COOLDOWN_MS = 15_000;
+
+/** Impostor -> host: trigger the lights sabotage (cuts crew vision to a small
+ *  radius). Mutually exclusive with an active door sabotage. */
+export interface SabotageLightsMsg {
+  t: "sabotage_lights";
+}
+
+/** Player -> host: flip one of the lights-repair switches on/off. */
+export interface LightSwitchMsg {
+  t: "light_switch";
+  index: number;
+  on: boolean;
+}
+
+/** Host -> clients: lights state. `out` = sabotaged (crew vision cut to a small
+ *  radius, cameras dead). `switches` is the repair panel's five toggles; once
+ *  every switch is ON the host restores the lights and clears `out`. */
+export interface LightsMsg {
+  t: "lights";
+  out: boolean;
+  switches: boolean[];
+}
+
 /** A vote target: a specific player, or an explicit skip. */
 export type VoteTarget = PeerId | "skip";
 
@@ -254,6 +285,9 @@ export type NetMessage =
   | StateMsg
   | LeaveMsg
   | SabotageDoorMsg
+  | SabotageLightsMsg
+  | LightSwitchMsg
+  | LightsMsg
   | DoorsMsg
   | GameOverMsg
   | KillMsg

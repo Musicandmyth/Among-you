@@ -84,6 +84,7 @@ const handlers: NetHandlers = {
   onState: (players) => game?.applyState(players),
   onInput: (id, x, y, vx, vy, vented) => game?.applyInput(id, x, y, vx, vy, vented),
   onDoors: (locked, cooling) => game?.setDoors(locked, cooling),
+  onLights: (out, switches) => game?.setLights(out, switches),
   onGameOver: (winner) => {
     meeting.close();
     showGameOver(winner);

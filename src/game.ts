@@ -5,7 +5,9 @@
  *   - reconcile remote players from network snapshots (interpolation)
  *   - VISION: exact analytic raycast so the player only sees what light reaches
  *   - MAP (toggle E): one shared map; impostors additionally get door-lock
- *     (sabotage) controls layered on the SAME map
+ *     and lights sabotage controls layered on the SAME map
+ *   - LIGHTS sabotage: cuts crew sight to a small radius + kills cameras until
+ *     someone flips all five switches at the Electrical control panel (key L)
  *   - actions: kill (impostor), report body, call emergency meeting
  *   - freeze/teleport during meetings
  */
@@ -14,13 +16,17 @@ import { Application, Container, Graphics, Text } from "pixi.js";
 import { Input } from "./input";
 import {
   WORLD, ROOMS, WALKABLE, DOORS, EMERGENCY_BUTTON,
-  SECURITY_CONSOLE, CAMERAS, moveWithCollision, rayDistance, type Door,
+  SECURITY_CONSOLE, LIGHTS_CONSOLE, ELECTRICAL_ROOM, CAMERAS,
+  moveWithCollision, rayDistance, type Door,
 } from "./map";
 import { taskById, type TaskDef } from "./tasks";
 import { VENTS, ventById, type VentDef } from "./vents";
 import { TaskUI } from "./taskui";
 import type { Net } from "./net";
-import type { GameRules, PeerId, PlayerInfo, PlayerState, Role } from "./protocol";
+import {
+  LIGHT_SWITCH_COUNT, LIGHTS_START_COOLDOWN_MS, LIGHTS_REPAIR_COOLDOWN_MS,
+  type GameRules, type PeerId, type PlayerInfo, type PlayerState, type Role,
+} from "./protocol";
 
 const SPEED = 190;
 const ACCEL = 1800;
@@ -39,6 +45,11 @@ const EMERGENCY_RANGE = 90; // must be this close to the cafeteria button
 const TASK_RANGE = 90; // must be this close to a task console to use it
 const VENT_RANGE = 34; // must be standing on top of the vent grate to drop in
 const SECURITY_RANGE = 110; // must be this close to the camera console to watch
+const LIGHTS_RANGE = 110; // must be this close to the lights panel to repair
+// When the lights are sabotaged, a crewmate can only see this far — roughly two
+// crewmate-widths (RADIUS is the body's half-width). Everything past it is dark,
+// as if a wall were there; within it, normal wall-occluded vision still applies.
+const LIGHTS_OUT_RADIUS = 4 * RADIUS;
 // Security-camera feeds are zoomed in, so you see 50% less of the surroundings
 // than if you were actually standing there (show 50% of the extent → 1/0.5 zoom).
 const CAMERA_ZOOM = 1 / 0.5;
@@ -138,6 +149,20 @@ export class Game {
   private camIndex = 0;
   private camHud?: HTMLElement;
 
+  // Lights sabotage. When `lightsOut`, crew vision is cut to a small radius and
+  // cameras are dead; repair by flipping all `lightSwitches` on at the Electrical
+  // control panel (key L). State is host-authoritative (see setLights).
+  private lightsOut = false;
+  private lightSwitches: boolean[] = new Array(LIGHT_SWITCH_COUNT).fill(false);
+  private lightsConsoleGfx = new Graphics();
+  private lightsPanel?: HTMLElement;
+  private lightsToast?: HTMLElement;
+  private mapLightsBtn?: Graphics; // impostor tablet: trigger control over Electrical
+  private mapLightsTag?: Text; // its label (shows "LIGHTS" or a cooldown countdown)
+  // Local mirror of the host's lights cooldown, for impostor-tablet feedback only
+  // (the host is authoritative). Set at round start and after a repair.
+  private lightsReadyAt = 0;
+
   // Action buttons (DOM).
   private btnKill?: HTMLButtonElement;
   private btnReport?: HTMLButtonElement;
@@ -198,6 +223,7 @@ export class Game {
 
     this.killReadyAt = now() + this.killCooldownMs;
     this.emergencyReadyAt = now() + this.emergencyCooldownMs; // initial cooldown
+    this.lightsReadyAt = now() + LIGHTS_START_COOLDOWN_MS; // 10s grace at match start
 
     this.keyHandler = (e) => {
       if (e.repeat) return;
@@ -217,6 +243,7 @@ export class Game {
       if (e.key === "f" || e.key === "F") this.tryEmergency();
       if (e.key === "q" || e.key === "Q") this.tryVent();
       if (e.key === "c" || e.key === "C") this.tryToggleCameras();
+      if (e.key === "l" || e.key === "L") this.tryOpenLights();
     };
     window.addEventListener("keydown", this.keyHandler);
 
@@ -263,7 +290,42 @@ export class Game {
 
     this.drawEmergencyButton();
     this.drawSecurityConsole();
+    this.drawLightsConsole();
     this.drawCameraIcons();
+  }
+
+  /** The lights control panel in Electrical — stand next to it and press L to
+   *  flip the repair switches while the lights are sabotaged. `lightsConsoleGfx`
+   *  is redrawn by setLights() so it glows red while power is out. */
+  private drawLightsConsole() {
+    this.scene.addChild(this.lightsConsoleGfx);
+    this.redrawLightsConsole();
+
+    const label = new Text({
+      text: "LIGHTS",
+      style: { fill: 0xffd23d, fontSize: 12, fontWeight: "800", fontFamily: "system-ui, sans-serif", letterSpacing: 1 },
+    });
+    label.anchor.set(0.5);
+    label.position.set(LIGHTS_CONSOLE.x, LIGHTS_CONSOLE.y + 34);
+    this.scene.addChild(label);
+  }
+
+  private redrawLightsConsole() {
+    const { x, y } = LIGHTS_CONSOLE;
+    const g = this.lightsConsoleGfx;
+    g.clear();
+    g.roundRect(x - 40, y - 22, 80, 44, 6).fill(0x14203a).stroke({ width: 4, color: 0x39456e });
+    // Five little switch pips; amber = on, dark = off. Red frame while sabotaged.
+    for (let i = 0; i < LIGHT_SWITCH_COUNT; i++) {
+      const on = this.lightSwitches[i];
+      const sx = x - 32 + i * 16;
+      g.roundRect(sx, y - 12, 10, 22, 2)
+        .fill(on ? 0xffd23d : 0x0c1330)
+        .stroke({ width: 1.5, color: on ? 0x7a5b00 : 0x39456e });
+    }
+    if (this.lightsOut) {
+      g.roundRect(x - 44, y - 26, 88, 52, 8).stroke({ width: 2, color: 0xff5b6e });
+    }
   }
 
   /** The camera console in the Security room — stand next to it and press C to
@@ -383,10 +445,10 @@ export class Game {
     this.updateActionButtons();
     this.updateTaskMarkers();
     this.updateVentAnims(dt);
-    if (this.mapOpen) this.updateMapMarker();
-    // Dying closes the feed. (The player is held at the console while watching,
-    // so they can't wander out of range.)
-    if (this.camsOpen && !this.local.alive) this.closeCameras();
+    if (this.mapOpen) { this.updateMapMarker(); this.refreshMapLights(); }
+    // Dying — or the lights going out — closes the feed. (The player is held at
+    // the console while watching, so they can't wander out of range.)
+    if (this.camsOpen && (!this.local.alive || this.lightsOut)) this.closeCameras();
   }
 
   /** Ghosts (dead players) are visible only to other ghosts; a vented impostor
@@ -513,12 +575,14 @@ export class Game {
     const origin = this.camsOpen ? this.camEye() : this.local;
     const px = origin.x;
     const py = origin.y;
+    // Lights sabotage cuts CREW sight to a small radius (impostors see normally).
+    const cap = this.lightsOut && this.role === "crew" ? LIGHTS_OUT_RADIUS : Infinity;
     const pts: number[] = [];
     for (let i = 0; i < VISION_RAYS; i++) {
       const ang = (i / VISION_RAYS) * Math.PI * 2;
       const dx = Math.cos(ang);
       const dy = Math.sin(ang);
-      const dist = rayDistance(px, py, dx, dy, this.blockers);
+      const dist = Math.min(rayDistance(px, py, dx, dy, this.blockers), cap);
       pts.push(px + dx * dist, py + dy * dist);
     }
     this.visionMask.clear();
@@ -533,6 +597,113 @@ export class Game {
     this.blockers = DOORS.filter((d) => this.lockedDoors.has(d.id));
     this.redrawDoors();
     this.refreshMapDoors();
+    this.refreshMapLights(); // a locked door disables the lights-sabotage control
+  }
+
+  // ---- lights sabotage ----
+
+  /** Host-authoritative lights update: redraw the console, keep the repair panel
+   *  and impostor tablet in sync, kill any camera feed, and toast the crew when
+   *  the power drops. */
+  setLights(out: boolean, switches: boolean[]) {
+    const wasOut = this.lightsOut;
+    this.lightsOut = out;
+    this.lightSwitches = Array.from(
+      { length: LIGHT_SWITCH_COUNT },
+      (_, i) => !!switches[i],
+    );
+    this.redrawLightsConsole();
+    this.refreshMapLights();
+    if (out && !wasOut) {
+      if (this.camsOpen) this.closeCameras();
+      if (this.role === "crew" && this.local?.alive) this.showLightsToast();
+    } else if (!out && wasOut) {
+      this.lightsReadyAt = now() + LIGHTS_REPAIR_COOLDOWN_MS; // cooldown after a fix
+      this.hideLightsToast();
+      this.closeLightsPanel(); // repaired — drop the panel if it's still open
+    }
+    if (this.lightsPanel && !this.lightsPanel.classList.contains("hidden")) {
+      this.refreshLightsPanel();
+    }
+  }
+
+  /** L: open the lights-repair panel, if the power is out and you're standing at
+   *  the Electrical control panel. Any living player may repair. */
+  private tryOpenLights() {
+    if (!this.lightsOut || this.frozen || !this.local.alive) return;
+    if (this.lightsPanel && !this.lightsPanel.classList.contains("hidden")) return;
+    if (!this.nearLightsConsole()) return;
+    this.openLightsPanel();
+  }
+
+  private nearLightsConsole(): boolean {
+    return dist2(this.local.x, this.local.y, LIGHTS_CONSOLE.x, LIGHTS_CONSOLE.y)
+      <= LIGHTS_RANGE * LIGHTS_RANGE;
+  }
+
+  private openLightsPanel() {
+    if (!this.lightsPanel) {
+      const el = document.createElement("div");
+      el.id = "lights-panel";
+      el.className = "overlay hidden";
+      el.innerHTML = `
+        <div class="task-card lights-card">
+          <div class="task-head">
+            <span>Restore Power · Electrical</span>
+            <button id="lights-close" class="task-close" aria-label="Close">✕</button>
+          </div>
+          <div class="task-body">
+            <div id="lights-switches" class="lights-switches"></div>
+            <div class="task-hint">Flip all five switches up to restore the lights.</div>
+          </div>
+        </div>`;
+      document.body.appendChild(el);
+      (el.querySelector("#lights-close") as HTMLElement).addEventListener("click", () => this.closeLightsPanel());
+      el.addEventListener("pointerdown", (e) => { if (e.target === el) this.closeLightsPanel(); });
+      const row = el.querySelector("#lights-switches") as HTMLElement;
+      for (let i = 0; i < LIGHT_SWITCH_COUNT; i++) {
+        const sw = document.createElement("button");
+        sw.className = "light-switch";
+        sw.dataset.i = String(i);
+        sw.innerHTML = `<span class="light-knob"></span>`;
+        // Switches are shared + two-way: flip toward the opposite of the current
+        // state. Anyone can toggle (an impostor may flip them back off to stall).
+        // The authoritative echo from the host refreshes the UI.
+        sw.addEventListener("click", () => this.net.requestLightSwitch(i, !this.lightSwitches[i]));
+        row.appendChild(sw);
+      }
+      this.lightsPanel = el;
+    }
+    this.lightsPanel.classList.remove("hidden");
+    this.refreshLightsPanel();
+  }
+
+  private refreshLightsPanel() {
+    const row = this.lightsPanel?.querySelector("#lights-switches");
+    if (!row) return;
+    row.querySelectorAll<HTMLElement>(".light-switch").forEach((sw) => {
+      sw.classList.toggle("on", !!this.lightSwitches[Number(sw.dataset.i)]);
+    });
+  }
+
+  private closeLightsPanel() {
+    this.lightsPanel?.classList.add("hidden");
+  }
+
+  private showLightsToast() {
+    if (!this.lightsToast) {
+      const el = document.createElement("div");
+      el.id = "lights-toast";
+      el.className = "lights-toast";
+      el.textContent = "⚠ Lights sabotaged — restore power in Electrical (L)";
+      document.body.appendChild(el);
+      this.lightsToast = el;
+    }
+    this.lightsToast.classList.add("show");
+  }
+
+  private hideLightsToast() {
+    this.lightsToast?.classList.remove("show");
   }
 
   private redrawDoors() {
@@ -843,6 +1014,7 @@ export class Game {
   private tryToggleCameras() {
     if (this.camsOpen) { this.closeCameras(); return; }
     if (this.frozen || !this.local.alive) return;
+    if (this.lightsOut) return; // cameras are dead while the lights are sabotaged
     if (!this.nearSecurityConsole()) return;
     this.camsOpen = true;
     this.camIndex = 0;
@@ -1021,6 +1193,34 @@ export class Game {
     }
     this.refreshMapDoors();
 
+    // Impostor tablet: a lights-sabotage control sitting over Electrical. Tapping
+    // it triggers the sabotage (the host enforces the mutual exclusion with doors).
+    if (impostor) {
+      const lx = (ELECTRICAL_ROOM.x + ELECTRICAL_ROOM.w / 2 - minX) * scale;
+      const ly = (ELECTRICAL_ROOM.y + ELECTRICAL_ROOM.h / 2 - minY) * scale;
+      const btn = new Graphics();
+      btn.position.set(lx, ly);
+      btn.eventMode = "static";
+      btn.cursor = "pointer";
+      btn.on("pointertap", () => {
+        // Host also guards all of this; these are just to avoid a no-op request.
+        if (this.lightsOut || this.lockedDoors.size > 0) return;
+        if (now() < this.lightsReadyAt) return; // still on cooldown
+        this.net.requestSabotageLights();
+      });
+      this.mapPanel.addChild(btn);
+      this.mapLightsBtn = btn;
+      const ltag = new Text({
+        text: "LIGHTS",
+        style: { fill: IMPOSTOR_COLOR, fontSize: 9, fontWeight: "800", fontFamily: "system-ui, sans-serif", letterSpacing: 1 },
+      });
+      ltag.anchor.set(0.5, 0);
+      ltag.position.set(lx, ly + 13);
+      this.mapPanel.addChild(ltag);
+      this.mapLightsTag = ltag;
+      this.refreshMapLights();
+    }
+
     // Crew: mark each task with a "!" on the minimap.
     for (const task of this.myTasks) {
       const g = new Graphics();
@@ -1070,6 +1270,34 @@ export class Game {
     }
   }
 
+  /** Recolor the impostor tablet's lights control: amber = ready, dim = blocked
+   *  (a door is locked) or on cooldown, red = already sabotaged. The label counts
+   *  down the remaining cooldown. */
+  private refreshMapLights() {
+    const g = this.mapLightsBtn;
+    if (!g) return;
+    const active = this.lightsOut;
+    const blocked = this.lockedDoors.size > 0; // door sabotage active → can't cut lights
+    const cdMs = active ? 0 : Math.max(0, this.lightsReadyAt - now());
+    const onCooldown = cdMs > 0;
+    const w = 34, h = 22;
+    const fill = active
+      ? { color: 0xff5b6e, alpha: 0.9 }
+      : blocked || onCooldown
+        ? { color: 0x39456e, alpha: 0.45 }
+        : { color: 0xffd23d, alpha: 0.85 };
+    const stroke = active ? 0x7a1622 : blocked || onCooldown ? 0x2a3358 : 0x7a5b00;
+    g.clear();
+    g.roundRect(-w / 2, -h / 2, w, h, 5).fill(fill).stroke({ width: 1.5, color: stroke });
+    // a small bulb glyph so it reads as "lights"
+    const glyph = active ? 0x2a0a0f : 0x1c1400;
+    g.circle(0, -1, 4.5).fill(glyph);
+    g.roundRect(-2.5, 3, 5, 4, 1).fill(glyph);
+    if (this.mapLightsTag) {
+      this.mapLightsTag.text = onCooldown ? `${Math.ceil(cdMs / 1000)}s` : "LIGHTS";
+    }
+  }
+
   private toggleMap() {
     if (this.frozen && !this.mapOpen) return; // no opening the map mid-meeting
     this.mapOpen = !this.mapOpen;
@@ -1111,6 +1339,7 @@ export class Game {
     this.closeCameras();
     this.clearBodies();
     this.taskUI.close();
+    this.closeLightsPanel();
     // Everyone gathers in a ring around the emergency button in the Cafeteria.
     const spot = this.meetingSpot();
     this.local.x = spot.x;
@@ -1139,6 +1368,7 @@ export class Game {
     this.frozen = false;
     this.killReadyAt = now() + this.killCooldownMs; // cooldowns reset after meetings
     this.emergencyReadyAt = now() + this.emergencyCooldownMs;
+    this.lightsReadyAt = now() + LIGHTS_START_COOLDOWN_MS; // round-start lights cooldown
   }
 
   // ---- network callbacks ----
@@ -1209,6 +1439,8 @@ export class Game {
     document.getElementById("role-badge")?.remove();
     this.clearVentNav();
     this.camHud?.remove();
+    this.lightsPanel?.remove();
+    this.lightsToast?.remove();
     this.taskUI.dispose();
     this.app.destroy(true, { children: true });
   }

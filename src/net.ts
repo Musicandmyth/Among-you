@@ -15,6 +15,9 @@ import type { DataConnection, PeerOptions } from "peerjs";
 import {
   peerIdForRoom,
   DEFAULT_RULES,
+  LIGHT_SWITCH_COUNT,
+  LIGHTS_START_COOLDOWN_MS,
+  LIGHTS_REPAIR_COOLDOWN_MS,
   type GameRules,
   type MeetingPlayer,
   type NetMessage,
@@ -48,6 +51,8 @@ export interface NetHandlers {
   /** The set of currently-locked doors changed. `cooling` doors are open and
    *  cannot be closed again yet (close-cooldown). */
   onDoors: (locked: string[], cooling: string[]) => void;
+  /** Lights state changed. `out` = sabotaged; `switches` are the repair toggles. */
+  onLights: (out: boolean, switches: boolean[]) => void;
   /** The match ended; `winner` is the winning team. */
   onGameOver: (winner: Role) => void;
   /** A player was killed; a body was placed at (x, y). */
@@ -192,6 +197,14 @@ export class Net {
    *  cooldown-expiry timers. A door cannot be closed while it is cooling. */
   private coolingDoors = new Set<string>();
   private cooldownTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** HOST: lights sabotage state. `lightsOut` cuts crew vision + kills cameras;
+   *  `lightSwitches` is the repair panel (all true → power restored). Mutually
+   *  exclusive with a door lock. */
+  private lightsOut = false;
+  private lightSwitches: boolean[] = new Array(LIGHT_SWITCH_COUNT).fill(false);
+  /** Timestamp (ms) before which lights cannot be sabotaged (round-start + repair
+   *  cooldowns). */
+  private lightsReadyAt = 0;
   /** HOST: set once a win condition fires, to stop further evaluation. */
   private ended = false;
 
@@ -330,6 +343,7 @@ export class Net {
             rules: this.rules, // late joiners need the rules too, or game.start() crashes
           });
           conn.send({ t: "doors", locked: [...this.lockedDoors], cooling: [...this.coolingDoors] });
+          conn.send({ t: "lights", out: this.lightsOut, switches: [...this.lightSwitches] });
           const { done, total } = this.taskCounts();
           conn.send({ t: "tasks", done, total });
         }
@@ -348,6 +362,12 @@ export class Net {
       case "sabotage_door":
         // Only impostors may lock doors.
         if (this.roleMap.get(conn.peer) === "impostor") this.lockDoor(msg.doorId);
+        break;
+      case "sabotage_lights":
+        this.hostSabotageLights(conn.peer);
+        break;
+      case "light_switch":
+        this.hostLightSwitch(msg.index, !!msg.on);
         break;
       case "kill":
         this.hostKill(conn.peer, msg.victim, msg.x, msg.y);
@@ -605,6 +625,7 @@ export class Net {
     this.meetingActive = false;
     this.clearMeetingTimers();
     this.lastMeetingAt = Date.now(); // emergency cooldown restarts after a meeting
+    this.lightsReadyAt = Date.now() + LIGHTS_START_COOLDOWN_MS; // and the lights cooldown (round start)
     this.resetDoors(); // doors are open + immediately closable coming out of a meeting
     this.broadcast({ t: "meeting_end" });
     this.handlers.onMeetingEnd();
@@ -622,11 +643,58 @@ export class Net {
     else this.hostConn?.send({ t: "sabotage_door", doorId });
   }
 
+  /** HOST or CLIENT(impostor): trigger the lights sabotage. */
+  requestSabotageLights() {
+    if (this.isHost) this.hostSabotageLights(this.myId);
+    else this.hostConn?.send({ t: "sabotage_lights" });
+  }
+
+  /** HOST or CLIENT(anyone): flip a lights-repair switch. */
+  requestLightSwitch(index: number, on: boolean) {
+    if (this.isHost) this.hostLightSwitch(index, on);
+    else this.hostConn?.send({ t: "light_switch", index, on });
+  }
+
+  /** HOST: begin the lights sabotage. Impostor-only, and blocked while a door is
+   *  locked (the two sabotages are mutually exclusive) or already out. Resets the
+   *  repair switches to all-off. */
+  private hostSabotageLights(requester: PeerId) {
+    if (!this.isHost || this.meetingActive || this.ended || !this.started) return;
+    if (this.roleMap.get(requester) !== "impostor") return;
+    if (this.lightsOut || this.lockedDoors.size > 0) return;
+    if (Date.now() < this.lightsReadyAt) return; // round-start / post-repair cooldown
+    this.lightsOut = true;
+    this.lightSwitches = new Array(LIGHT_SWITCH_COUNT).fill(false);
+    this.broadcastLights();
+  }
+
+  /** HOST: set one repair switch on/off. Switches are shared and two-way — anyone
+   *  at the panel can flip them either direction, so an impostor can turn switches
+   *  back off to stall the crew's repair. Power is restored only once ALL are on. */
+  private hostLightSwitch(index: number, on: boolean) {
+    if (!this.isHost || !this.lightsOut || this.ended) return;
+    if (!Number.isInteger(index) || index < 0 || index >= this.lightSwitches.length) return;
+    this.lightSwitches[index] = on;
+    if (this.lightSwitches.every(Boolean)) {
+      this.lightsOut = false;
+      this.lightsReadyAt = Date.now() + LIGHTS_REPAIR_COOLDOWN_MS; // cooldown after a fix
+    }
+    this.broadcastLights();
+  }
+
+  private broadcastLights() {
+    const out = this.lightsOut;
+    const switches = [...this.lightSwitches];
+    this.broadcast({ t: "lights", out, switches });
+    this.handlers.onLights(out, switches);
+  }
+
   /** HOST: lock a door for a fixed duration, then auto-unlock. A door that is
    *  already closed, or still on its close-cooldown from a recent open, cannot
    *  be closed. */
   private lockDoor(doorId: string) {
     if (!this.isHost) return;
+    if (this.lightsOut) return; // door + lights sabotage are mutually exclusive
     if (this.lockedDoors.has(doorId) || this.coolingDoors.has(doorId)) return;
     this.lockedDoors.add(doorId);
     this.broadcastDoors();
@@ -687,6 +755,7 @@ export class Net {
     // Reset emergency tracking; the round-start cooldown runs from now.
     this.emergencyCount.clear();
     this.lastMeetingAt = Date.now();
+    this.lightsReadyAt = Date.now() + LIGHTS_START_COOLDOWN_MS; // 10s grace at match start
 
     // Deal each crewmate their own random task sequence.
     this.taskAssign.clear();
@@ -789,6 +858,9 @@ export class Net {
     this.coolingDoors.clear();
     for (const t of this.cooldownTimers.values()) clearTimeout(t);
     this.cooldownTimers.clear();
+    this.lightsOut = false;
+    this.lightSwitches = new Array(LIGHT_SWITCH_COUNT).fill(false);
+    this.lightsReadyAt = 0;
   }
 
   /** HOST: push the combined world snapshot to all clients. */
@@ -823,6 +895,9 @@ export class Net {
         break;
       case "doors":
         this.handlers.onDoors(msg.locked, msg.cooling);
+        break;
+      case "lights":
+        this.handlers.onLights(msg.out, msg.switches);
         break;
       case "gameover":
         this.handlers.onGameOver(msg.winner);
