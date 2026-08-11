@@ -39,9 +39,15 @@ const EMERGENCY_RANGE = 90; // must be this close to the cafeteria button
 const TASK_RANGE = 90; // must be this close to a task console to use it
 const VENT_RANGE = 34; // must be standing on top of the vent grate to drop in
 const SECURITY_RANGE = 110; // must be this close to the camera console to watch
-// Camera feeds are zoomed in, so you see ~25% less of the surroundings than if
-// you were actually standing there (show ~75% of the extent → 1/0.75 zoom).
-const CAMERA_ZOOM = 1 / 0.75;
+// Security-camera feeds are zoomed in, so you see 50% less of the surroundings
+// than if you were actually standing there (show 50% of the extent → 1/0.5 zoom).
+const CAMERA_ZOOM = 1 / 0.5;
+// The normal (player-following) viewport is zoomed so you see 40% less of the
+// surroundings than at the base scale (show 60% of the extent → 1/0.6 zoom).
+const PLAYER_ZOOM = 1 / 0.6;
+// Player avatars and vents are counter-scaled by the inverse of the viewport
+// zoom so they keep their ORIGINAL on-screen size while the map renders closer.
+const ENTITY_SCALE = 1 / PLAYER_ZOOM;
 
 const CREW_COLOR = 0x5b8cff;
 const IMPOSTOR_COLOR = 0xff5b6e;
@@ -343,6 +349,7 @@ export class Game {
     container.addChild(label);
 
     container.position.set(x, y);
+    container.scale.set(ENTITY_SCALE); // keep avatars at original size despite the viewport zoom
     this.scene.addChild(container);
 
     this.avatars.set(info.id, {
@@ -477,7 +484,7 @@ export class Game {
     const halfH = this.app.screen.height / 2;
     // When watching cameras, the viewport looks from the camera's spot instead
     // of following the local player, and zooms in so you see ~25% less.
-    const scale = this.camsOpen ? CAMERA_ZOOM : 1;
+    const scale = this.camsOpen ? CAMERA_ZOOM : PLAYER_ZOOM;
     this.camera.scale.set(scale);
     const focus = this.camsOpen ? this.camEye() : this.local;
     let camX = halfW - focus.x * scale;
@@ -676,6 +683,7 @@ export class Game {
     for (const v of VENTS) {
       const g = new Graphics();
       g.position.set(v.x, v.y);
+      g.scale.set(ENTITY_SCALE); // keep vents at original size despite the viewport zoom
       if (this.role === "impostor") {
         g.eventMode = "static";
         g.cursor = "pointer";
@@ -773,9 +781,9 @@ export class Game {
       anim.t += dt;
       const p = Math.min(1, anim.t / DURATION);
       const pop = 1 + 0.45 * Math.sin(p * Math.PI); // 1 → 1.45 → 1
-      anim.g.scale.set(pop);
+      anim.g.scale.set(ENTITY_SCALE * pop);
       if (p >= 1) {
-        anim.g.scale.set(1);
+        anim.g.scale.set(ENTITY_SCALE);
         this.ventAnims.splice(i, 1);
       }
     }
