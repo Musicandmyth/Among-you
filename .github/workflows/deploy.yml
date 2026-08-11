@@ -63,10 +63,24 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
+      # NOTE: we deliberately do NOT use actions/upload-pages-artifact here. That
+      # action is a composite that internally calls `actions/upload-artifact@v4`
+      # by *tag*, which this repo's "actions must be pinned to a full-length SHA"
+      # policy rejects (the build job then fails at "Set up job"). Instead we
+      # reproduce exactly what it does: tar `dist` into the Pages artifact layout
+      # and upload it (SHA-pinned) under the reserved `github-pages` name that the
+      # deploy-pages action consumes.
+      - name: Archive Pages artifact
+        run: >-
+          tar --dereference --hard-dereference --directory dist
+          -cvf "$RUNNER_TEMP/artifact.tar" --exclude=.git --exclude=.github .
+
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          path: dist
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
 
   deploy:
     needs: build
