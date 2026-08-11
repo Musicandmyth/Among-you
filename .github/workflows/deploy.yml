@@ -47,6 +47,14 @@ jobs:
       - name: Build
         run: npm run build
         env:
+          # Custom PeerJS signaling server (optional). Unset secrets resolve to
+          # empty strings, which the client treats as "use the public cloud broker".
+          VITE_PEER_HOST: ${{ secrets.VITE_PEER_HOST }}
+          VITE_PEER_PORT: ${{ secrets.VITE_PEER_PORT }}
+          VITE_PEER_PATH: ${{ secrets.VITE_PEER_PATH }}
+          VITE_PEER_KEY: ${{ secrets.VITE_PEER_KEY }}
+          VITE_PEER_SECURE: ${{ secrets.VITE_PEER_SECURE }}
+          # TURN relay (optional). STUN-only direct P2P is the default when unset.
           VITE_TURN_URLS: ${{ secrets.VITE_TURN_URLS }}
           VITE_TURN_USERNAME: ${{ secrets.VITE_TURN_USERNAME }}
           VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
