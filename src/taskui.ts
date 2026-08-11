@@ -91,52 +91,7 @@ export class TaskUI {
       case "upload": return this.renderTransfer("upload");
       case "keypad": return this.renderKeypad();
       case "reactor": return this.renderReactor();
-      case "scan": return this.renderScan();
     }
-  }
-
-  // ---- scan: a VISUAL task. Stand on the scanner and let it read your vitals.
-  //      No inputs — everyone nearby watches the same sweep, which is what clears
-  //      an honest crewmate. ----
-
-  private renderScan() {
-    const wrap = document.createElement("div");
-    wrap.className = "scan";
-    wrap.innerHTML = `
-      <div class="scan-bay">
-        <div class="scan-figure"></div>
-        <div class="scan-beam"></div>
-      </div>
-      <div class="scan-readout">
-        <div><span>WEIGHT</span><b id="scan-w">— kg</b></div>
-        <div><span>HEIGHT</span><b id="scan-h">— cm</b></div>
-        <div><span>O₂ SAT</span><b id="scan-o">— %</b></div>
-      </div>`;
-    this.bodyEl.appendChild(wrap);
-    const msg = this.hint("Hold still — submitting scan. Everyone can see this.");
-
-    const wEl = wrap.querySelector("#scan-w") as HTMLElement;
-    const hEl = wrap.querySelector("#scan-h") as HTMLElement;
-    const oEl = wrap.querySelector("#scan-o") as HTMLElement;
-
-    // ~5.5s sweep. The in-world visual animation (game.ts) runs a touch longer so
-    // observers see the whole thing even with a little network latency.
-    const DURATION = 5500;
-    const TICK = 90;
-    const t0 = performance.now();
-    let timer: ReturnType<typeof setInterval> | undefined = setInterval(() => {
-      const p = Math.min(1, (performance.now() - t0) / DURATION);
-      wEl.textContent = Math.round(50 + p * 32) + " kg";
-      hEl.textContent = Math.round(150 + p * 35) + " cm";
-      oEl.textContent = Math.round(80 + p * 18) + " %";
-      if (p >= 1) {
-        clearInterval(timer);
-        timer = undefined;
-        msg.textContent = "Scan complete — you're cleared.";
-        this.finish();
-      }
-    }, TICK);
-    this.cleanup = () => timer && clearInterval(timer);
   }
 
   // ---- wires: connect each left node to the same-colored right node ----

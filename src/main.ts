@@ -99,7 +99,6 @@ const handlers: NetHandlers = {
   onVoting: () => meeting.startVoting(lastVotingMs),
   onChat: (_from, name, color, text) => meeting.addChat(name, color, text),
   onTasks: (done, total) => updateTaskbar(done, total),
-  onVisual: (player, taskId) => game?.applyVisual(player, taskId),
   onMeetingResult: (ejected, wasImpostor, tally) => {
     game?.applyEject(ejected);
     meeting.showResult(ejected, wasImpostor, tally);
@@ -222,8 +221,7 @@ function updateTaskbar(done: number, total: number) {
   bar.classList.remove("hidden");
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   fill.style.width = pct + "%";
-  // No numeric count — just the fill bar, so progress can't be read at a glance.
-  label.textContent = "Total Tasks";
+  label.textContent = `Total Tasks  ${done} / ${total}`;
 }
 
 function showGameOver(winner: Role) {

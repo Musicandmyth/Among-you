@@ -213,22 +213,6 @@ export interface TaskDoneMsg {
   taskId: string;
 }
 
-/** Crewmate -> host: I'm starting a VISUAL task (e.g. the MedBay scan). The host
- *  validates it (crew + assigned + actually visual) and, if legit, tells everyone
- *  to play the on-screen "task in progress" animation over me — which is what
- *  clears an honest crewmate, since impostors can't produce it. */
-export interface VisualReqMsg {
-  t: "visual_req";
-  taskId: string;
-}
-
-/** Host -> clients: play `taskId`'s visual animation over `player`. */
-export interface VisualMsg {
-  t: "visual";
-  player: PeerId;
-  taskId: string;
-}
-
 /** Host -> clients: global task progress (done / total across all crew). */
 export interface TaskProgressMsg {
   t: "tasks";
@@ -284,8 +268,6 @@ export type NetMessage =
   | MeetingEndMsg
   | TaskDoneMsg
   | TaskProgressMsg
-  | VisualReqMsg
-  | VisualMsg
   | MigrateMsg
   | KickedMsg;
 

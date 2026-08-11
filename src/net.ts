@@ -24,7 +24,7 @@ import {
   type Role,
   type VoteTarget,
 } from "./protocol";
-import { assignTasks, isVisualTask } from "./tasks";
+import { assignTasks } from "./tasks";
 
 export interface NetHandlers {
   /** Fired once the local peer is connected and has an identity. */
@@ -66,8 +66,6 @@ export interface NetHandlers {
   onChat: (from: PeerId, name: string, color: number, text: string) => void;
   /** Global task progress changed (done / total across all crew). */
   onTasks: (done: number, total: number) => void;
-  /** A player is performing a VISUAL task; play its animation over them. */
-  onVisual: (player: PeerId, taskId: string) => void;
   /** The meeting resolved. */
   onMeetingResult: (
     ejected: PeerId | null,
@@ -119,16 +117,10 @@ function iceConfig(): RTCConfiguration {
     });
   }
 
-  // IMPORTANT: never force relay-only (iceTransportPolicy: "relay"). It routes
-  // ALL peer traffic through TURN, so any TURN misconfiguration — e.g. leftover
-  // placeholder credentials in the deployed build's secrets — silently severs
-  // every connection, even though local dev (which has no secrets) keeps working.
-  // That exact mismatch has broken the GitHub Pages build before. STUN gives
-  // direct P2P out of the box and the TURN entry above is a NON-exclusive
-  // fallback, so connections always have a path. (True IP-hiding via forced relay
-  // is only safe with a verified, always-on TURN server; re-enable it here only
-  // once you have one — VITE_ICE_RELAY_ONLY is intentionally ignored otherwise.)
-  return { iceServers };
+  // Relay-only is explicit opt-in AND requires TURN to be present, otherwise it
+  // would discard every candidate and connect to nobody.
+  const relayOnly = turnUrls.length > 0 && env.VITE_ICE_RELAY_ONLY === "true";
+  return relayOnly ? { iceServers, iceTransportPolicy: "relay" } : { iceServers };
 }
 
 /**
@@ -327,7 +319,6 @@ export class Net {
             impostors: role === "impostor" ? this.impostorIds : [],
             impostorCount: this.impostorIds.length,
             tasks: this.taskAssign.get(conn.peer) ?? [],
-            rules: this.rules,
           });
           conn.send({ t: "doors", locked: [...this.lockedDoors], cooling: [...this.coolingDoors] });
           const { done, total } = this.taskCounts();
@@ -366,9 +357,6 @@ export class Net {
         break;
       case "task_done":
         this.hostTaskDone(conn.peer, msg.taskId);
-        break;
-      case "visual_req":
-        this.hostVisual(conn.peer, msg.taskId);
         break;
       default:
         break; // hosts ignore other message kinds
@@ -444,12 +432,6 @@ export class Net {
     else this.hostConn?.send({ t: "task_done", taskId });
   }
 
-  /** Ask the host to broadcast that we're doing a visual task (MedBay scan). */
-  requestVisual(taskId: string) {
-    if (this.isHost) this.hostVisual(this.myId, taskId);
-    else this.hostConn?.send({ t: "visual_req", taskId });
-  }
-
   /** Send a chat message during a meeting. */
   requestChat(text: string) {
     if (this.isHost) this.hostChat(this.myId, text);
@@ -521,19 +503,6 @@ export class Net {
     if (!set) this.taskDone.set(player, (set = new Set()));
     set.add(taskId);
     this.broadcastTaskProgress();
-  }
-
-  /** HOST: validate and relay a visual-task performance. Only a living crewmate
-   *  doing one of their OWN assigned visual tasks produces the animation — an
-   *  impostor can't fake it, which is exactly what makes the scan "clear" you. */
-  private hostVisual(player: PeerId, taskId: string) {
-    if (!this.isHost || !this.started || this.ended) return;
-    if (this.dead.has(player)) return;
-    if (this.roleMap.get(player) !== "crew") return;
-    if (!this.taskAssign.get(player)?.includes(taskId)) return;
-    if (!isVisualTask(taskId)) return;
-    this.broadcast({ t: "visual", player, taskId });
-    this.handlers.onVisual(player, taskId);
   }
 
   /** HOST: current global task counts across the living-or-dead crew, using
@@ -863,9 +832,6 @@ export class Net {
         break;
       case "tasks":
         this.handlers.onTasks(msg.done, msg.total);
-        break;
-      case "visual":
-        this.handlers.onVisual(msg.player, msg.taskId);
         break;
       case "meeting_result":
         this.handlers.onMeetingResult(msg.ejected, msg.ejectedWasImpostor, msg.tally);

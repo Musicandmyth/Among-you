@@ -1,10 +1,9 @@
 name: Deploy to GitHub Pages
 
-# THE ONLY Pages workflow. It builds the Vite client and publishes dist/ on every
-# push to main. Do NOT re-add GitHub's suggested "Jekyll" or "Static HTML"
-# starter workflows: those deploy the UNBUILT repo source (index.html ->
-# /src/main.ts), which the browser blocks (MIME video/mp2t) so no JS runs and the
-# page looks dead. Two Pages workflows also race for the github-pages environment.
+# Build the Vite client and publish dist/ to GitHub Pages on every push to main.
+# The game "servers" are peer-to-peer host sessions that run in players' browsers
+# (via PeerJS), so there is nothing server-side to deploy here — Pages only serves
+# the static client, and sessions keep working unchanged.
 
 on:
   push:
@@ -16,7 +15,7 @@ permissions:
   pages: write
   id-token: write
 
-# One Pages deployment at a time; a newer push supersedes an in-flight one.
+# Only one Pages deployment at a time; let a newer push supersede an in-flight one.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -39,14 +38,16 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # Optional TURN credentials come from repo secrets; if unset the build falls
-      # back to STUN-only direct P2P. (Relay-only is disabled in code — see net.ts.)
+      # TURN credentials come from repo secrets. If unset, the build falls back
+      # to STUN-only (direct P2P). NOTE: VITE_* values are inlined into the public
+      # bundle and are readable by anyone — prefer short-lived TURN credentials.
       - name: Build
         run: npm run build
         env:
           VITE_TURN_URLS: ${{ secrets.VITE_TURN_URLS }}
           VITE_TURN_USERNAME: ${{ secrets.VITE_TURN_USERNAME }}
           VITE_TURN_CREDENTIAL: ${{ secrets.VITE_TURN_CREDENTIAL }}
+          VITE_ICE_RELAY_ONLY: ${{ secrets.VITE_ICE_RELAY_ONLY }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
