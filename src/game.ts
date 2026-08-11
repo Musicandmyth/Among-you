@@ -149,6 +149,8 @@ export class Game {
   private camsOpen = false;
   private camIndex = 0;
   private camHud?: HTMLElement;
+  private cameraLensGfx: Graphics[] = []; // per-camera red light, flashes when monitored
+  private watchedCams = new Set<number>(); // camera indices currently being watched (from host)
 
   // Lights sabotage. When `lightsOut`, crew vision is cut to a small radius and
   // cameras are dead; repair by flipping all `lightSwitches` on at the Electrical
@@ -353,7 +355,7 @@ export class Game {
   /** Little wall-mounted cameras in the hallways, drawn as map decor: a bracket
    *  flush to the wall, an arm, and a body whose lens points into the hallway. */
   private drawCameraIcons() {
-    for (const cam of CAMERAS) {
+    CAMERAS.forEach((cam, i) => {
       const { x, y } = cam.eye;
       const dx = cam.dir.x;
       const dy = cam.dir.y;
@@ -363,9 +365,15 @@ export class Game {
       g.circle(mx, my, 5).fill(0x2a3358).stroke({ width: 2, color: 0x6f7bad }); // wall bracket
       g.moveTo(mx, my).lineTo(x, y).stroke({ width: 3, color: 0x6f7bad }); // arm
       g.roundRect(x - 8, y - 6, 16, 12, 3).fill(0x2a3358).stroke({ width: 2, color: 0x6f7bad }); // body
-      g.circle(x + dx * 7, y + dy * 7, 3).fill(0xff5b6e); // lens, pointing inward
       this.scene.addChild(g);
-    }
+      // The lens is its own graphic so its red light can flash while the feed is
+      // being monitored (see updateCameraLights).
+      const lens = new Graphics();
+      lens.circle(x + dx * 7, y + dy * 7, 3.5).fill(0xff5b6e);
+      lens.alpha = 0.55;
+      this.scene.addChild(lens);
+      this.cameraLensGfx[i] = lens;
+    });
   }
 
   /** The emergency-meeting console at the center of the Cafeteria — the only
@@ -449,6 +457,7 @@ export class Game {
     this.updateVisibility();
     this.updateActionButtons();
     this.updateReportButtons();
+    this.updateCameraLights();
     this.updateTaskMarkers();
     this.updateVentAnims(dt);
     if (this.mapOpen) { this.updateMapMarker(); this.refreshMapLights(); }
@@ -1058,6 +1067,7 @@ export class Game {
     if (!this.nearSecurityConsole()) return;
     this.camsOpen = true;
     this.camIndex = 0;
+    this.net.setWatchedCamera(this.camIndex); // flash this camera's light for others
     this.showCamHud();
     this.updateCamHud();
   }
@@ -1065,6 +1075,7 @@ export class Game {
   private closeCameras() {
     if (!this.camsOpen) return;
     this.camsOpen = false;
+    this.net.setWatchedCamera(null); // stop flashing our camera
     this.camHud?.classList.add("hidden");
   }
 
@@ -1072,7 +1083,23 @@ export class Game {
   private switchCamera(dir: 1 | -1) {
     if (!this.camsOpen || CAMERAS.length === 0) return;
     this.camIndex = (this.camIndex + dir + CAMERAS.length) % CAMERAS.length;
+    this.net.setWatchedCamera(this.camIndex); // move the flashing light to the new feed
     this.updateCamHud();
+  }
+
+  /** Host-driven: which camera feeds are being monitored (their lights flash). */
+  setCamerasWatched(watched: number[]) {
+    this.watchedCams = new Set(watched);
+  }
+
+  /** Flash the red light on any camera whose feed is currently being watched. */
+  private updateCameraLights() {
+    const blinkOn = Math.floor(now() / 450) % 2 === 0;
+    for (let i = 0; i < this.cameraLensGfx.length; i++) {
+      const lens = this.cameraLensGfx[i];
+      if (!lens) continue;
+      lens.alpha = this.watchedCams.has(i) ? (blinkOn ? 1 : 0.12) : 0.55;
+    }
   }
 
   /** The current camera's eye — the world point the viewport looks from. */

@@ -154,6 +154,19 @@ export interface LightsMsg {
   switches: boolean[];
 }
 
+/** Player -> host: I'm now monitoring camera `index` (or null = stopped watching). */
+export interface WatchCameraMsg {
+  t: "watch_camera";
+  index: number | null;
+}
+
+/** Host -> clients: which camera feeds are currently being monitored, so their
+ *  red lights flash for everyone in the world (a tell that someone's watching). */
+export interface CamerasMsg {
+  t: "cameras";
+  watched: number[];
+}
+
 /** A vote target: a specific player, or an explicit skip. */
 export type VoteTarget = PeerId | "skip";
 
@@ -288,6 +301,8 @@ export type NetMessage =
   | SabotageLightsMsg
   | LightSwitchMsg
   | LightsMsg
+  | WatchCameraMsg
+  | CamerasMsg
   | DoorsMsg
   | GameOverMsg
   | KillMsg

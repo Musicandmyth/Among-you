@@ -53,6 +53,9 @@ export interface NetHandlers {
   onDoors: (locked: string[], cooling: string[]) => void;
   /** Lights state changed. `out` = sabotaged; `switches` are the repair toggles. */
   onLights: (out: boolean, switches: boolean[]) => void;
+  /** The set of camera feeds currently being monitored changed (their red lights
+   *  flash for everyone). */
+  onCameras: (watched: number[]) => void;
   /** The match ended; `winner` is the winning team. */
   onGameOver: (winner: Role) => void;
   /** A player was killed; a body was placed at (x, y). */
@@ -205,6 +208,9 @@ export class Net {
   /** Timestamp (ms) before which lights cannot be sabotaged (round-start + repair
    *  cooldowns). */
   private lightsReadyAt = 0;
+  /** HOST: which camera index each player is currently monitoring (absent = not
+   *  watching). The union of values is broadcast so the cameras' lights flash. */
+  private watchedCameras = new Map<PeerId, number>();
   /** HOST: set once a win condition fires, to stop further evaluation. */
   private ended = false;
 
@@ -344,6 +350,7 @@ export class Net {
           });
           conn.send({ t: "doors", locked: [...this.lockedDoors], cooling: [...this.coolingDoors] });
           conn.send({ t: "lights", out: this.lightsOut, switches: [...this.lightSwitches] });
+          conn.send({ t: "cameras", watched: [...new Set(this.watchedCameras.values())] });
           const { done, total } = this.taskCounts();
           conn.send({ t: "tasks", done, total });
         }
@@ -368,6 +375,9 @@ export class Net {
         break;
       case "light_switch":
         this.hostLightSwitch(msg.index, !!msg.on);
+        break;
+      case "watch_camera":
+        this.hostSetWatchedCamera(conn.peer, msg.index);
         break;
       case "kill":
         this.hostKill(conn.peer, msg.victim, msg.x, msg.y);
@@ -397,6 +407,7 @@ export class Net {
     this.roster.delete(id);
     this.conns.delete(id);
     this.taskDone.delete(id);
+    if (this.watchedCameras.delete(id)) this.broadcastCameras(); // stop their camera light
     this.broadcast({ t: "leave", id });
     this.broadcast({ t: "lobby", players: this.playerList() });
     this.handlers.onLobby(this.playerList());
@@ -655,6 +666,26 @@ export class Net {
     else this.hostConn?.send({ t: "light_switch", index, on });
   }
 
+  /** Report that this peer is now monitoring camera `index` (or null = stopped),
+   *  so the camera's light flashes for everyone. */
+  setWatchedCamera(index: number | null) {
+    if (this.isHost) this.hostSetWatchedCamera(this.myId, index);
+    else this.hostConn?.send({ t: "watch_camera", index });
+  }
+
+  private hostSetWatchedCamera(peer: PeerId, index: number | null) {
+    if (!this.isHost) return;
+    if (index === null || index < 0) this.watchedCameras.delete(peer);
+    else this.watchedCameras.set(peer, index);
+    this.broadcastCameras();
+  }
+
+  private broadcastCameras() {
+    const watched = [...new Set(this.watchedCameras.values())];
+    this.broadcast({ t: "cameras", watched });
+    this.handlers.onCameras(watched);
+  }
+
   /** HOST: begin the lights sabotage. Impostor-only, and blocked while a door is
    *  locked (the two sabotages are mutually exclusive) or already out. Resets the
    *  repair switches to all-off. */
@@ -861,6 +892,7 @@ export class Net {
     this.lightsOut = false;
     this.lightSwitches = new Array(LIGHT_SWITCH_COUNT).fill(false);
     this.lightsReadyAt = 0;
+    this.watchedCameras.clear();
   }
 
   /** HOST: push the combined world snapshot to all clients. */
@@ -898,6 +930,9 @@ export class Net {
         break;
       case "lights":
         this.handlers.onLights(msg.out, msg.switches);
+        break;
+      case "cameras":
+        this.handlers.onCameras(msg.watched);
         break;
       case "gameover":
         this.handlers.onGameOver(msg.winner);
