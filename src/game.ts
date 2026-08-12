@@ -13,7 +13,7 @@
  */
 
 import { Application, Container, Graphics, Text } from "pixi.js";
-import { Input } from "./input";
+import { Input, isCoarsePointer } from "./input";
 import {
   WORLD, ROOMS, WALKABLE, DOORS, EMERGENCY_BUTTON,
   SECURITY_CONSOLE, LIGHTS_CONSOLE, ELECTRICAL_ROOM, CAMERAS,
@@ -169,6 +169,7 @@ export class Game {
   // Action buttons (DOM). Report + emergency are in-world click targets now.
   private btnKill?: HTMLButtonElement;
   private btnVent?: HTMLButtonElement;
+  private mapBtn?: HTMLButtonElement; // touch-only on-screen map toggle (no E key)
 
   private sendAcc = 0;
   private broadcastAcc = 0;
@@ -754,6 +755,7 @@ export class Game {
     container.addChild(reportBtn);
 
     container.position.set(x, y);
+    container.scale.set(ENTITY_SCALE); // match the live crewmates' on-screen size
     this.scene.addChildAt(container, this.scene.getChildIndex(this.doorGfx) + 1);
     this.bodies.set(bodyId, { container, reportBtn, x, y });
   }
@@ -761,8 +763,9 @@ export class Game {
   /** A clickable "REPORT" pill that floats above a body. */
   private makeReportButton(bodyId: string): Container {
     const btn = new Container();
-    btn.position.set(0, -46);
-    btn.scale.set(ENTITY_SCALE); // keep it a readable size despite the viewport zoom
+    btn.position.set(0, -62); // float clear above the (now smaller) body
+    // No own scale: the parent body container is already counter-scaled by
+    // ENTITY_SCALE, which keeps this pill at the same readable size as before.
     btn.eventMode = "static";
     btn.cursor = "pointer";
 
@@ -1175,6 +1178,16 @@ export class Game {
     document.getElementById("actions")?.classList.remove("hidden");
     this.btnKill?.addEventListener("click", () => this.tryKill());
     this.btnVent?.addEventListener("click", () => this.tryVent());
+
+    // Touch devices have no `E` key, so give them an on-screen Map toggle.
+    if (isCoarsePointer()) {
+      const btn = document.createElement("button");
+      btn.className = "map-btn";
+      btn.textContent = "Map";
+      btn.addEventListener("click", () => this.toggleMap());
+      document.body.appendChild(btn);
+      this.mapBtn = btn;
+    }
   }
 
   // ---- single map overlay (E) with impostor sabotage ----
@@ -1488,6 +1501,7 @@ export class Game {
     document.getElementById("role-badge")?.remove();
     this.clearVentNav();
     this.camHud?.remove();
+    this.mapBtn?.remove();
     this.lightsPanel?.remove();
     this.lightsToast?.remove();
     this.taskUI.dispose();

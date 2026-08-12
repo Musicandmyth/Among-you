@@ -69,8 +69,8 @@ export class Input {
   }
 }
 
-/** Coarse pointer = touchscreen (phone/tablet), where an on-screen stick is needed. */
-function isCoarsePointer(): boolean {
+/** Coarse pointer = touchscreen (phone/tablet), where on-screen controls are needed. */
+export function isCoarsePointer(): boolean {
   return (
     typeof window !== "undefined" &&
     (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window)

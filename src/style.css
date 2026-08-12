@@ -29,6 +29,23 @@ html, body {
 #game canvas { touch-action: none; }
 button, .btn, .action, .swatch, .light-switch { touch-action: manipulation; }
 
+/* On-screen Map toggle (touch devices only; added by game.ts). */
+.map-btn {
+  position: fixed;
+  top: 16px; right: 16px;
+  z-index: 8;
+  padding: 11px 18px;
+  border-radius: 12px;
+  border: 1px solid #2c3757;
+  background: rgba(30, 39, 64, 0.9);
+  color: var(--text);
+  font-size: 15px; font-weight: 800; letter-spacing: 0.5px;
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.map-btn:active { transform: translateY(1px); }
+
 /* On-screen movement thumbstick (touch devices only; added by input.ts). */
 .joystick {
   position: fixed;
