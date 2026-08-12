@@ -19,9 +19,38 @@ html, body {
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   overflow: hidden;
+  overscroll-behavior: none; /* no pull-to-refresh / rubber-banding on touch */
 }
 
 .hidden { display: none !important; }
+
+/* Touch: the game canvas owns its gestures (no page scroll/zoom), and taps on
+   controls fire immediately (no 300ms double-tap-zoom delay). */
+#game canvas { touch-action: none; }
+button, .btn, .action, .swatch, .light-switch { touch-action: manipulation; }
+
+/* On-screen movement thumbstick (touch devices only; added by input.ts). */
+.joystick {
+  position: fixed;
+  left: 24px; bottom: 24px;
+  width: 128px; height: 128px;
+  border-radius: 50%;
+  background: rgba(20, 27, 46, 0.45);
+  border: 2px solid rgba(111, 123, 173, 0.5);
+  display: grid; place-items: center;
+  z-index: 8;
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+}
+.joystick-knob {
+  width: 58px; height: 58px;
+  border-radius: 50%;
+  background: rgba(91, 140, 255, 0.85);
+  border: 2px solid #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  will-change: transform;
+}
 
 /* ---- Lobby ---- */
 .screen {
